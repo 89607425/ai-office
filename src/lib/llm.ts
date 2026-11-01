@@ -18,39 +18,68 @@ const PROVIDERS: Record<string, { baseURL: string; model: string }> = {
   qwen: { baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
 };
 
+/**
+ * 每个员工可以有自己的厂商和 key。
+ * 解析优先级：员工档案 > .env.local 全局兜底 > 演示模式。
+ */
+export type Binding = { provider?: string; apiKey?: string; model?: string } | null | undefined;
+
+export type Resolved = {
+  mode: LLMMode;
+  baseURL: string;
+  model: string;
+  key: string;
+  provider: string;
+  label: string;
+};
+
+export function resolve(b: Binding): Resolved {
+  const provider = (b?.provider || process.env.LLM_PROVIDER || 'deepseek').toLowerCase();
+  const preset = PROVIDERS[provider];
+  const key = (b?.apiKey || process.env.LLM_API_KEY || '').trim();
+  const model = (b?.model || process.env.LLM_MODEL || preset?.model || 'deepseek-chat').trim();
+  const baseURL =
+    (provider === 'custom' ? process.env.LLM_BASE_URL : undefined) ||
+    (b?.provider && !preset ? process.env.LLM_BASE_URL : undefined) ||
+    preset?.baseURL ||
+    PROVIDERS.deepseek.baseURL;
+
+  if (!key) {
+    return { mode: 'demo', baseURL, model, key: '', provider, label: '演示模式' };
+  }
+  return { mode: 'live', baseURL, model, key, provider, label: `${provider} / ${model}` };
+}
+
+/** 给 UI 用：这个员工实际会走哪家 */
+export function bindingLabel(a: { provider?: string; api_key?: string; model?: string }): string {
+  return resolve({ provider: a.provider, apiKey: a.api_key, model: a.model }).label;
+}
+
 export function provider(): string {
   return (process.env.LLM_PROVIDER || 'deepseek').toLowerCase();
 }
 
 export function modelName(): string {
-  if (process.env.LLM_MODEL) return process.env.LLM_MODEL;
-  const p = PROVIDERS[provider()];
-  return p ? p.model : 'deepseek-chat';
-}
-
-export function baseURL(): string {
-  if (process.env.LLM_BASE_URL) return process.env.LLM_BASE_URL;
-  const p = PROVIDERS[provider()];
-  return p ? p.baseURL : PROVIDERS.deepseek.baseURL;
+  return resolve(null).model;
 }
 
 export function mode(): LLMMode {
-  const key = process.env.LLM_API_KEY;
-  return key && key.trim().length > 0 ? 'live' : 'demo';
+  return process.env.LLM_API_KEY ? 'live' : 'demo';
 }
 
-export async function chat(call: LLMCall): Promise<string> {
-  if (mode() === 'demo') return demoEngine(call);
+export async function chat(call: LLMCall, binding?: Binding): Promise<string> {
+  const r = resolve(binding);
+  if (r.mode === 'demo') return demoEngine(call);
 
-  const url = baseURL().replace(/\/$/, '') + '/chat/completions';
+  const url = r.baseURL.replace(/\/$/, '') + '/chat/completions';
   const body: Record<string, unknown> = {
-    model: modelName(),
+    model: r.model,
     messages: call.messages,
     temperature: call.temperature ?? 0.85,
     max_tokens: call.maxTokens ?? 700,
     stream: false,
   };
-  if (call.json) body.response_format = { type: 'json_object' };
+  if (call.json && r.provider !== 'qwen') body.response_format = { type: 'json_object' };
 
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 60000);
@@ -59,7 +88,7 @@ export async function chat(call: LLMCall): Promise<string> {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${process.env.LLM_API_KEY}`,
+        Authorization: `Bearer ${r.key}`,
       },
       body: JSON.stringify(body),
       signal: ctrl.signal,

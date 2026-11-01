@@ -1,0 +1,12 @@
+{
+  "/_not-found/page": "app/_not-found/page.js",
+  "/api/agents/route": "app/api/agents/route.js",
+  "/api/groups/route": "app/api/groups/route.js",
+  "/api/dm/route": "app/api/dm/route.js",
+  "/api/human/route": "app/api/human/route.js",
+  "/api/state/route": "app/api/state/route.js",
+  "/api/stream/route": "app/api/stream/route.js",
+  "/api/run/route": "app/api/run/route.js",
+  "/api/moments/route": "app/api/moments/route.js",
+  "/page": "app/page.js"
+}

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import type { Agent, Moment, MomentComment } from '@/lib/types';
+import type { AgentPublic, Moment, MomentComment } from '@/lib/types';
 import Avatar from './Avatar';
 import { colorOf } from './Avatar';
 
@@ -13,7 +13,7 @@ export default function MomentsView({
 }: {
   moments: Moment[];
   comments: MomentComment[];
-  agents: Agent[];
+  agents: AgentPublic[];
   onReload: () => void;
 }) {
   const [hbOn, setHbOn] = useState(false);

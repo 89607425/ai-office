@@ -2,9 +2,20 @@ import { db } from './db';
 import { chat, mode, modelName, provider } from './llm';
 import { emit, store } from './bus';
 import { parseToolCall, runTool, logSandboxBlock } from './sandbox';
-import type { Agent, Group, Message, Persona } from './types';
+import { bindingLabel } from './llm';
+import type { Agent, AgentPublic, Group, Message, Persona } from './types';
 
 export const MAX_ROUNDS = 8;
+
+/** 每个员工走自己的厂商和 key；没配就落到全局 env，再没有就演示模式 */
+export function bindingOf(a: Agent | null | undefined) {
+  if (!a) return null;
+  return {
+    provider: a.provider || undefined,
+    apiKey: a.api_key || undefined,
+    model: a.model || undefined,
+  };
+}
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const uid = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -21,6 +32,21 @@ export function parsePersona(raw: string): Persona {
 
 export function getAgents(): Agent[] {
   return db().prepare('SELECT * FROM agents ORDER BY created_at').all() as Agent[];
+}
+
+/** 脱敏后再发给浏览器：key 只留末四位 */
+export function publicAgent(a: Agent): AgentPublic {
+  const { api_key, ...rest } = a;
+  return {
+    ...rest,
+    key_set: !!api_key,
+    key_hint: api_key ? `…${api_key.slice(-4)}` : '',
+    binding: bindingLabel(a),
+  };
+}
+
+export function publicAgents(list: Agent[]): AgentPublic[] {
+  return list.map(publicAgent);
 }
 
 export function getAgent(id: string): Agent | null {
@@ -60,6 +86,161 @@ export function addMemory(agentId: string, scope: string, content: string): void
   db()
     .prepare('INSERT INTO memories (id,agent_id,scope,content,created_at) VALUES (?,?,?,?,?)')
     .run(uid('mem'), agentId, scope, content, Date.now());
+}
+
+/* ----------------------------- 1-1 私聊 ----------------------------- */
+
+export const dmId = (agentId: string) => `dm:${agentId}`;
+export const isDm = (id: string) => id.startsWith('dm:');
+export const dmAgentId = (id: string) => id.slice(3);
+
+/**
+ * 老板跟某个员工私聊。老板说的话只进这个员工的私有记忆，
+ * 群里其他人看不到 —— 这就是"私下交代"的效果。
+ */
+export async function sendDm(agentId: string, content: string): Promise<void> {
+  const agent = getAgent(agentId);
+  if (!agent) throw new Error('员工不存在');
+
+  postMessage({
+    group_id: dmId(agentId),
+    run_id: null,
+    sender_id: 'boss',
+    sender_name: '老板',
+    content,
+    kind: 'human',
+  });
+  addMemory(agentId, 'private', `老板私下对我说过：${content}`);
+
+  const p = parsePersona(agent.persona);
+  const history = getMessages(dmId(agentId), 20).slice(-12);
+  const privateMem = getMemories(agentId, 'private', 4);
+
+  const sys = [
+    agent.system_prompt,
+    `你的说话风格：${p.tone}。口头禅：${p.catchphrase}。小习惯：${p.quirks.join('；') || '无'}。`,
+    `现在是私聊，只有你和老板两个人。你可以说在群里不敢说的话，更真实、更直接。`,
+    `严格要求：中文口语，1-3 句，不要自称 AI，不要用 Markdown。`,
+  ].join('\n');
+
+  const messages = [
+    { role: 'system' as const, content: sys },
+    {
+      role: 'user' as const,
+      content: `这是你和老板的私聊记录（最近几条）：
+${history.map((m) => `${m.sender_id === 'boss' ? '老板' : agent.name}：${m.content}`).join('\n') || '（还没有聊过）'}
+${privateMem.length ? `\n你自己的记忆：\n${privateMem.map((m) => `- ${m}`).join('\n')}` : ''}
+老板刚说：${content}
+现在回复老板。`,
+    },
+  ];
+
+  const [lo, hi] = p.latency;
+  await typing(dmId(agentId), agent, lo + Math.random() * Math.max(0, hi - lo));
+
+  try {
+    const reply = await chat({ tag: 'agent', messages, temperature: 0.95 }, bindingOf(agent));
+    postMessage({
+      group_id: dmId(agentId),
+      run_id: null,
+      sender_id: agent.id,
+      sender_name: agent.name,
+      content: reply.replace(/```json[\s\S]*?```/g, '').trim() || '……',
+      kind: 'chat',
+    });
+  } catch (e) {
+    // key 填错、余额不足、模型不可用都会走到这里。如实告诉老板，不要假装没事
+    postMessage({
+      group_id: dmId(agentId),
+      run_id: null,
+      sender_id: 'system',
+      sender_name: '系统',
+      content: `${agent.name} 没回上话：${String(e).slice(0, 160)}`,
+      kind: 'system',
+    });
+  }
+}
+
+/* ----------------------------- 建员工 / 建群 ----------------------------- */
+
+export function createAgent(input: {
+  id?: string;
+  name: string;
+  avatar?: string;
+  role: string;
+  system_prompt: string;
+  provider?: string;
+  api_key?: string;
+  model?: string;
+  sassiness?: number;
+  tone?: string;
+  catchphrase?: string;
+  tools_enabled?: number;
+}): Agent {
+  const id = (input.id || input.name).replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '').slice(0, 20) || uid('a');
+  if (getAgent(id)) throw new Error(`已经有一个叫「${id}」的员工了`);
+
+  const persona = JSON.stringify({
+    tone: input.tone || '说话直接，有自己的主见',
+    catchphrase: input.catchphrase || '',
+    latency: [800, 2600],
+    sassiness: input.sassiness ?? 0.3,
+    quirks: [],
+    workHours: [9, 23],
+  });
+
+  db()
+    .prepare(
+      'INSERT INTO agents (id,name,avatar,role,system_prompt,model,provider,api_key,persona,tools_enabled,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)'
+    )
+    .run(
+      id,
+      input.name,
+      input.avatar || input.name.slice(0, 1),
+      input.role,
+      input.system_prompt,
+      input.model || '',
+      input.provider || '',
+      input.api_key || '',
+      persona,
+      input.tools_enabled ?? 0,
+      Date.now()
+    );
+  return getAgent(id)!;
+}
+
+export function createGroup(input: {
+  id?: string;
+  name: string;
+  topic?: string;
+  leaderId: string;
+  criticId?: string;
+  memberIds: string[];
+}): Group {
+  const id = input.id || `g_${Date.now().toString(36)}`;
+  const members = input.memberIds.filter((m) => getAgent(m));
+  if (!members.includes(input.leaderId)) members.push(input.leaderId);
+  if (members.length < 2) throw new Error('一个群至少要两个人');
+
+  const critic = input.criticId && members.includes(input.criticId)
+    ? input.criticId
+    : members.find((m) => m !== input.leaderId) || input.leaderId;
+
+  db()
+    .prepare('INSERT INTO groups (id,name,topic,leader_id,critic_id,created_at) VALUES (?,?,?,?,?,?)')
+    .run(id, input.name, input.topic || '', input.leaderId, critic, Date.now());
+  const ins = db().prepare('INSERT INTO group_members (group_id,agent_id) VALUES (?,?)');
+  for (const m of members) ins.run(id, m);
+
+  postMessage({
+    group_id: id,
+    run_id: null,
+    sender_id: 'system',
+    sender_name: '系统',
+    content: `群「${input.name}」已建立，组长是${getAgent(input.leaderId)?.name}。发个任务试试。`,
+    kind: 'system',
+  });
+  return getGroup(id)!;
 }
 
 /* ----------------------------- 写入 + 广播 ----------------------------- */
@@ -195,7 +376,7 @@ ${humanNotes.length ? `\n老板（人类管理员）的插话：\n${humanNotes.j
     },
   ];
 
-  const out = await chat({ tag: 'leader', messages, temperature: 0.7, json: true });
+  const out = await chat({ tag: 'leader', messages, temperature: 0.7, json: true }, bindingOf(leader));
   return parseLeaderOut(out);
 }
 
@@ -235,20 +416,24 @@ ${privateMem.length ? `你自己的记忆：\n${privateMem.map((m) => `- ${m}`).
     },
   ];
 
-  let text = await chat({ tag: 'agent', messages, temperature: 0.9 });
+  const bind = bindingOf(agent);
+  let text = await chat({ tag: 'agent', messages, temperature: 0.9 }, bind);
 
   // 复读检测必须放在工具执行之前：否则被丢弃的第一版回复已经把工具跑了一遍，
   // 群里会留下两条一模一样的工具消息
   if (isRepeat(agent.id, group.id, text.replace(/```json[\s\S]*?```/g, ''))) {
     log(`检测到 ${agent.name} 复读，强制换角度`);
-    text = await chat({
-      tag: 'agent',
-      messages: [
-        ...messages,
-        { role: 'user' as const, content: '注意：你刚才说的和之前重复了，换一个角度，说点新的。' },
-      ],
-      temperature: 1.0,
-    });
+    text = await chat(
+      {
+        tag: 'agent',
+        messages: [
+          ...messages,
+          { role: 'user' as const, content: '注意：你刚才说的和之前重复了，换一个角度，说点新的。' },
+        ],
+        temperature: 1.0,
+      },
+      bind
+    );
   }
 
   // 一次 ReAct：解析工具调用 → 执行 → 把结果喂回去再要一次最终回复
@@ -266,15 +451,18 @@ ${privateMem.length ? `你自己的记忆：\n${privateMem.map((m) => `- ${m}`).
         kind: res.ok ? 'tool_result' : 'tool',
       });
       void toolMsg;
-      const follow = await chat({
-        tag: 'agent',
-        messages: [
-          ...messages,
-          { role: 'assistant' as const, content: text },
-          { role: 'user' as const, content: `工具执行结果：${res.output}\n现在用一句口语把结果说给群里听，不要再输出代码块。` },
-        ],
-        temperature: 0.9,
-      });
+      const follow = await chat(
+        {
+          tag: 'agent',
+          messages: [
+            ...messages,
+            { role: 'assistant' as const, content: text },
+            { role: 'user' as const, content: `工具执行结果：${res.output}\n现在用一句口语把结果说给群里听，不要再输出代码块。` },
+          ],
+          temperature: 0.9,
+        },
+        bind
+      );
       text = follow.replace(/```json[\s\S]*?```/g, '').trim() || text;
     }
   }
@@ -306,30 +494,35 @@ async function maybeAppeal(
   const chance = Math.min(0.6, p.sassiness * 0.35) + (repeated ? 0.4 : 0);
   if (!force && Math.random() > chance) return;
 
-  const text = await chat({
-    tag: 'appeal',
-    messages: [
-      { role: 'system' as const, content: agent.system_prompt },
-      {
-        role: 'user' as const,
-        content: `你在群「${group.name}」里干活。组长刚给你的指令是：${instruction}
+  const text = await chat(
+    {
+      tag: 'appeal',
+      messages: [
+        { role: 'system' as const, content: agent.system_prompt },
+        {
+          role: 'user' as const,
+          content: `你在群「${group.name}」里干活。组长刚给你的指令是：${instruction}
 你的回复是：${reply}
 现在你要私聊"老板"（这个群的人类管理员，上帝视角），越级汇报你的真实想法。
 要求：一句到两句，说具体的事（引用刚才的指令），带情绪但别撒娇，像员工私下找老板吐槽。不要自称 AI。`,
-      },
-    ],
-    temperature: 1.0,
-  });
+        },
+      ],
+      temperature: 1.0,
+    },
+    bindingOf(agent)
+  );
 
-  const id = uid('god');
-  db()
-    .prepare(
-      'INSERT INTO god_inbox (id,agent_id,agent_name,avatar,group_id,content,kind,reply,created_at) VALUES (?,?,?,?,?,?,?,?,?)'
-    )
-    .run(id, agent.id, agent.name, agent.avatar, group.id, text.trim(), repeated ? 'complain' : 'appeal', null, Date.now());
-  const mail = db().prepare('SELECT * FROM god_inbox WHERE id = ?').get(id) as never;
+  // 直接落进这个员工和老板的 1-1 会话，不再单独开一个信箱
+  postMessage({
+    group_id: dmId(agent.id),
+    run_id: run.id,
+    sender_id: agent.id,
+    sender_name: agent.name,
+    content: text.trim(),
+    kind: 'appeal',
+    meta: JSON.stringify({ group: group.name, tone: repeated ? 'complain' : 'appeal' }),
+  });
   store[`appealed_${run.id}`] = true;
-  emit({ type: 'god', mail });
 }
 
 /* ----------------------------- 主循环 ----------------------------- */
@@ -500,5 +693,10 @@ async function loop(group: Group, run: { id: string; goal: string; round: number
 }
 
 export function runtimeInfo() {
-  return { mode: mode(), provider: provider(), model: modelName() };
+  return {
+    mode: mode(),
+    provider: provider(),
+    model: modelName(),
+    globalKey: !!process.env.LLM_API_KEY,
+  };
 }

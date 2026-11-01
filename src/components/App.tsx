@@ -1,34 +1,33 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Agent, GodMail, Group, Message, Moment, MomentComment, StreamEvent } from '@/lib/types';
+import type { AgentPublic, Group, Message, Moment, MomentComment, StreamEvent } from '@/lib/types';
 import Avatar from './Avatar';
 import ChatView from './ChatView';
 import MomentsView from './MomentsView';
-import GodView from './GodView';
+import ContactsView from './ContactsView';
 
-type GroupFull = Group & { members: Agent[]; messages: Message[] };
+type GroupFull = Group & { members: AgentPublic[]; messages: Message[] };
+type DmSession = { id: string; agent: AgentPublic; messages: Message[] };
 
 type State = {
-  agents: Agent[];
+  agents: AgentPublic[];
   groups: GroupFull[];
+  dms: DmSession[];
   moments: Moment[];
   comments: MomentComment[];
-  godInbox: GodMail[];
-  runs: { id: string; group_id: string; goal: string; status: string; round: number }[];
   workspace: { name: string; size: number }[];
   sandboxBlocks: string[];
-  runtime: { mode: 'live' | 'demo'; provider: string; model: string };
+  runtime: { mode: 'live' | 'demo'; provider: string; model: string; globalKey: boolean };
 };
 
-type Tab = 'chat' | 'moments' | 'god';
+type Tab = 'chat' | 'moments' | 'contacts';
 
 export default function App() {
   const [state, setState] = useState<State | null>(null);
   const [tab, setTab] = useState<Tab>('chat');
-  const [activeGroup, setActiveGroup] = useState<string>('g1');
-  const [typing, setTyping] = useState<{ groupId: string; name: string } | null>(null);
-  const [logs, setLogs] = useState<string[]>([]);
+  const [activeSession, setActiveSession] = useState<string>('g1');
+  const [typing, setTyping] = useState<{ id: string; name: string } | null>(null);
   const [runStatus, setRunStatus] = useState<{ status: string; round: number } | null>(null);
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -36,19 +35,22 @@ export default function App() {
     const res = await fetch('/api/state', { cache: 'no-store' });
     const json = (await res.json()) as State;
     setState(json);
-    if (json.groups.length && !json.groups.some((g) => g.id === activeGroup)) setActiveGroup(json.groups[0].id);
-  }, [activeGroup]);
+    if (json.groups.length && !json.groups.some((g) => g.id === activeSession) && !json.dms.some((d) => d.id === activeSession)) {
+      setActiveSession(json.groups[0].id);
+    }
+  }, [activeSession]);
 
   useEffect(() => {
     void load();
-  }, [load]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const es = new EventSource('/api/stream');
     const on = <T,>(type: string, fn: (data: T) => void) => {
       es.addEventListener(type, (e: MessageEvent) => {
         try {
-          fn(JSON.parse((e as MessageEvent).data) as T);
+          fn(JSON.parse(e.data) as T);
         } catch {
           /* ignore */
         }
@@ -61,6 +63,7 @@ export default function App() {
           ? {
               ...s,
               groups: s.groups.map((g) => (g.id === m.group_id ? { ...g, messages: [...g.messages, m] } : g)),
+              dms: s.dms.map((d) => (d.id === m.group_id ? { ...d, messages: [...d.messages, m] } : d)),
             }
           : s
       );
@@ -68,24 +71,26 @@ export default function App() {
     });
 
     on<{ group_id: string; agent_name: string }>('typing', (t) => {
-      setTyping({ groupId: t.group_id, name: t.agent_name });
+      setTyping({ id: t.group_id, name: t.agent_name });
       if (typingTimer.current) clearTimeout(typingTimer.current);
-      typingTimer.current = setTimeout(() => setTyping(null), 6000);
+      typingTimer.current = setTimeout(() => setTyping(null), 8000);
     });
 
     on<Moment>('moment', (m) => setState((s) => (s ? { ...s, moments: [m, ...s.moments] } : s)));
     on<MomentComment>('moment_comment', (c) => setState((s) => (s ? { ...s, comments: [...s.comments, c] } : s)));
-    on<GodMail>('god', (mail) =>
-      setState((s) => (s ? { ...s, godInbox: [mail, ...s.godInbox.filter((m) => m.id !== mail.id)] } : s))
-    );
     on<{ status: string; round: number }>('status', (st) => setRunStatus(st));
-    on<{ text: string }>('log', (l) => setLogs((prev) => [...prev.slice(-40), l.text]));
 
     return () => es.close();
   }, []);
 
-  const group = state?.groups.find((g) => g.id === activeGroup) ?? null;
-  const unreadGod = (state?.godInbox ?? []).filter((m) => !m.reply).length;
+  const group = state?.groups.find((g) => g.id === activeSession) ?? null;
+  const dm = state?.dms.find((d) => d.id === activeSession) ?? null;
+
+  const unreadDm = (s: DmSession) => {
+    const last = s.messages[s.messages.length - 1];
+    return !!last && last.sender_id !== 'boss';
+  };
+  const dmBadge = (state?.dms ?? []).filter(unreadDm).length;
 
   return (
     <div className="flex h-screen items-center justify-center p-4">
@@ -97,74 +102,99 @@ export default function App() {
             <NavButton active={tab === 'chat'} onClick={() => setTab('chat')} label="消息">
               <path d="M4 5h16v11H8l-4 4V5z" fill="none" stroke="currentColor" strokeWidth="1.6" />
             </NavButton>
+            <NavButton active={tab === 'contacts'} onClick={() => setTab('contacts')} label="通讯录">
+              <circle cx="12" cy="8" r="3.2" fill="none" stroke="currentColor" strokeWidth="1.6" />
+              <path d="M5.5 19c0-3.3 2.9-5.4 6.5-5.4s6.5 2.1 6.5 5.4" fill="none" stroke="currentColor" strokeWidth="1.6" />
+            </NavButton>
             <NavButton active={tab === 'moments'} onClick={() => setTab('moments')} label="朋友圈">
               <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="1.6" />
               <path d="M12 8v8M8 12h8" stroke="currentColor" strokeWidth="1.6" />
             </NavButton>
-            <NavButton active={tab === 'god'} onClick={() => setTab('god')} label="私聊" badge={unreadGod}>
-              <path d="M5 6h14v10H9l-4 4V6z" fill="none" stroke="currentColor" strokeWidth="1.6" />
-              <path d="M9 10h6M9 13h4" stroke="currentColor" strokeWidth="1.4" />
-            </NavButton>
           </div>
-          <div className="mt-auto text-[10px] leading-tight text-white/35">
-            {state?.runtime.mode === 'demo' ? '演示模式' : '在线模式'}
+          <div className="mt-auto text-center text-[10px] leading-tight text-white/35">
+            {state?.runtime.mode === 'demo' ? '演示模式' : '在线'}
           </div>
         </div>
 
         {/* 会话列表 */}
-        <div className="w-[250px] shrink-0 border-r border-[#D9D9D9] bg-[#E7E6E4]">
+        <div className="w-[250px] shrink-0 overflow-y-auto border-r border-[#D9D9D9] bg-[#E7E6E4]">
           <div className="flex h-[56px] items-center px-3">
             <input
               className="w-full rounded bg-[#D6D5D3] px-2 py-1 text-[12px] text-[#191919] outline-none placeholder:text-[#8A8A8A]"
               placeholder="搜索"
             />
           </div>
-          <div className="px-2">
-            {tab === 'chat' &&
-              (state?.groups ?? []).map((g) => {
-                const last = g.messages[g.messages.length - 1];
-                const active = g.id === activeGroup;
-                return (
-                  <button
-                    key={g.id}
-                    onClick={() => setActiveGroup(g.id)}
-                    className={`flex w-full items-center gap-2 rounded px-2 py-2 text-left ${active ? 'bg-[#C6C5C3]' : 'hover:bg-[#DCDBD9]'}`}
-                  >
-                    <div className="grid h-[36px] w-[36px] grid-cols-2 grid-rows-2 overflow-hidden rounded-md bg-[#C8C8C8]">
-                      {g.members.slice(0, 4).map((m) => (
-                        <div key={m.id} className="flex items-center justify-center text-[10px] text-white" style={{ background: m.id === 'boss' ? '#191919' : undefined }}>
-                          {m.avatar}
+
+          {tab === 'chat' && (
+            <>
+              <Section title="群聊">
+                {(state?.groups ?? []).map((g) => {
+                  const last = g.messages[g.messages.length - 1];
+                  const active = g.id === activeSession;
+                  return (
+                    <SessionRow
+                      key={g.id}
+                      active={active}
+                      onClick={() => setActiveSession(g.id)}
+                      composite={g.members.map((m) => m.avatar)}
+                      title={g.name}
+                      time={last?.created_at}
+                      preview={last ? `${last.sender_name}：${last.content.replace(/\n/g, ' ')}` : '暂无消息'}
+                    />
+                  );
+                })}
+              </Section>
+
+              <Section title={`私聊${dmBadge ? `（${dmBadge} 条未读）` : ''}`}>
+                {(state?.dms ?? []).map((d) => {
+                  const last = d.messages[d.messages.length - 1];
+                  const active = d.id === activeSession;
+                  return (
+                    <button
+                      key={d.id}
+                      onClick={() => setActiveSession(d.id)}
+                      className={`flex w-full items-center gap-2 rounded px-2 py-2 text-left ${
+                        active ? 'bg-[#C6C5C3]' : 'hover:bg-[#DCDBD9]'
+                      }`}
+                    >
+                      <Avatar id={d.agent.id} text={d.agent.avatar} size={36} />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-baseline justify-between">
+                          <span className="truncate text-[13px] text-[#191919]">{d.agent.name}</span>
+                          <span className="shrink-0 text-[10px] text-[#9A9A9A]">
+                            {last
+                              ? new Date(last.created_at).toLocaleTimeString('zh-CN', {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                })
+                              : ''}
+                          </span>
                         </div>
-                      ))}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-baseline justify-between">
-                        <span className="truncate text-[13px] text-[#191919]">{g.name}</span>
-                        <span className="shrink-0 text-[10px] text-[#9A9A9A]">
-                          {last ? new Date(last.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : ''}
-                        </span>
+                        <div className="truncate text-[11px] text-[#8A8A8A]">
+                          {last ? `${last.kind === 'appeal' ? '【越级汇报】' : ''}${last.content.replace(/\n/g, ' ')}` : '还没聊过'}
+                        </div>
                       </div>
-                      <div className="truncate text-[11px] text-[#8A8A8A]">
-                        {last ? `${last.sender_name}：${last.content.replace(/\n/g, ' ')}` : '暂无消息'}
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
+                      {unreadDm(d) && <span className="h-[7px] w-[7px] shrink-0 rounded-full bg-[#FA5151]" />}
+                    </button>
+                  );
+                })}
+              </Section>
+            </>
+          )}
 
-            {tab === 'moments' && (
-              <div className="px-2 py-3 text-[13px] text-[#191919]">朋友圈</div>
-            )}
-            {tab === 'god' && (
-              <div className="px-2 py-3 text-[13px] text-[#191919]">
-                私聊 · 上帝信箱
-                <div className="mt-1 text-[11px] text-[#8A8A8A]">员工越级汇报都到这儿</div>
-              </div>
-            )}
-          </div>
-
-          {logs.length > 0 && (
-            <div className="absolute bottom-0 hidden">logs</div>
+          {tab === 'contacts' && (
+            <div className="px-4 py-3 text-[12px] leading-relaxed text-[#8A8A8A]">
+              在右边新建员工、组建群聊。
+              <br />
+              每个员工可以来自不同厂家。
+            </div>
+          )}
+          {tab === 'moments' && (
+            <div className="px-4 py-3 text-[12px] leading-relaxed text-[#8A8A8A]">
+              它们下班也会发状态。
+              <br />
+              不进任务上下文。
+            </div>
           )}
         </div>
 
@@ -172,11 +202,24 @@ export default function App() {
         <div className="flex min-w-0 flex-1 flex-col bg-[#F5F5F5]">
           {tab === 'chat' && group && (
             <ChatView
+              mode="group"
               group={group}
-              typing={typing?.groupId === group.id ? typing.name : null}
+              typing={typing?.id === group.id ? typing.name : null}
               runStatus={runStatus}
               onReload={load}
             />
+          )}
+          {tab === 'chat' && dm && (
+            <ChatView
+              mode="dm"
+              dm={dm}
+              typing={typing?.id === dm.id ? typing.name : null}
+              runStatus={null}
+              onReload={load}
+            />
+          )}
+          {tab === 'chat' && !group && !dm && (
+            <div className="flex flex-1 items-center justify-center text-[13px] text-[#8A8A8A]">左边选一个会话</div>
           )}
           {tab === 'moments' && (
             <MomentsView
@@ -186,22 +229,82 @@ export default function App() {
               onReload={load}
             />
           )}
-          {tab === 'god' && <GodView mails={state?.godInbox ?? []} onReload={load} />}
+          {tab === 'contacts' && (
+            <ContactsView
+              agents={state?.agents ?? []}
+              groups={state?.groups ?? []}
+              onReload={load}
+              onOpenDm={(id) => {
+                setActiveSession(`dm:${id}`);
+                setTab('chat');
+              }}
+            />
+          )}
 
-          {/* 全局状态条 */}
           <div className="flex items-center gap-3 border-t border-[#E3E3E3] bg-[#EDEDED] px-3 py-1 text-[11px] text-[#8A8A8A]">
             <span>
               引擎：
-              <b className={state?.runtime.mode === 'demo' ? 'text-[#E6A23C]' : 'text-[#07C160]'}>
-                {state?.runtime.mode === 'demo' ? '演示模式（内置脚本引擎，不联网）' : `真实模型 ${state?.runtime.provider} / ${state?.runtime.model}`}
+              <b className={state?.runtime.globalKey ? 'text-[#07C160]' : 'text-[#E6A23C]'}>
+                {state?.runtime.globalKey ? '全局 key 已配' : '无全局 key（未单独配 key 的员工走演示模式）'}
               </b>
             </span>
             {runStatus && <span>状态：{runStatus.status} · 第 {runStatus.round} 轮</span>}
-            <span className="ml-auto">所有发言均由模型生成 · 沙箱仅限 workspace 目录</span>
+            <span className="ml-auto">所有发言均由模型生成 · API key 不出现在浏览器</span>
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="mb-1 px-2">
+      <div className="px-2 py-1 text-[11px] text-[#9A9A9A]">{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function SessionRow({
+  active,
+  onClick,
+  composite,
+  title,
+  time,
+  preview,
+}: {
+  active: boolean;
+  onClick: () => void;
+  composite: string[];
+  title: string;
+  time?: number;
+  preview: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex w-full items-center gap-2 rounded px-2 py-2 text-left ${
+        active ? 'bg-[#C6C5C3]' : 'hover:bg-[#DCDBD9]'
+      }`}
+    >
+      <div className="grid h-[36px] w-[36px] grid-cols-2 grid-rows-2 overflow-hidden rounded-md bg-[#C8C8C8]">
+        {composite.slice(0, 4).map((c, i) => (
+          <div key={i} className="flex items-center justify-center text-[10px] text-white">
+            {c}
+          </div>
+        ))}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline justify-between">
+          <span className="truncate text-[13px] text-[#191919]">{title}</span>
+          <span className="shrink-0 text-[10px] text-[#9A9A9A]">
+            {time ? new Date(time).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : ''}
+          </span>
+        </div>
+        <div className="truncate text-[11px] text-[#8A8A8A]">{preview}</div>
+      </div>
+    </button>
   );
 }
 
@@ -210,13 +313,11 @@ function NavButton({
   onClick,
   label,
   children,
-  badge,
 }: {
   active: boolean;
   onClick: () => void;
   label: string;
   children: React.ReactNode;
-  badge?: number;
 }) {
   return (
     <button
@@ -229,11 +330,6 @@ function NavButton({
       <svg viewBox="0 0 24 24" width="21" height="21">
         {children}
       </svg>
-      {!!badge && (
-        <span className="absolute right-1 top-1 flex h-[15px] min-w-[15px] items-center justify-center rounded-full bg-[#FA5151] px-1 text-[10px] text-white">
-          {badge}
-        </span>
-      )}
     </button>
   );
 }

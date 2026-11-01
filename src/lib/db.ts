@@ -17,6 +17,8 @@ function createDb(): Database.Database {
       role TEXT NOT NULL,
       system_prompt TEXT NOT NULL,
       model TEXT NOT NULL DEFAULT '',
+      provider TEXT NOT NULL DEFAULT '',
+      api_key TEXT NOT NULL DEFAULT '',
       persona TEXT NOT NULL,
       tools_enabled INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL
@@ -91,7 +93,16 @@ function createDb(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(group_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_moments_time ON moments(created_at);
   `);
+  migrate(db);
   return db;
+}
+
+/** 兼容老库：缺列就补上，不丢数据 */
+function migrate(d: Database.Database): void {
+  const colsOf = (t: string) => (d.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
+  const agentCols = colsOf('agents');
+  if (!agentCols.includes('provider')) d.exec('ALTER TABLE agents ADD COLUMN provider TEXT NOT NULL DEFAULT ""');
+  if (!agentCols.includes('api_key')) d.exec('ALTER TABLE agents ADD COLUMN api_key TEXT NOT NULL DEFAULT ""');
 }
 
 let _db: Database.Database | null = null;
@@ -119,6 +130,8 @@ export const SEED_AGENTS = [
     system_prompt:
       '你是老张，技术负责人，这个群的组长。你说话喜欢先"对齐一下"，习惯用"闭环""抓手""颗粒度"这类词。你有点官僚，喜欢开会，但技术判断其实靠谱。你的职责：把目标拆成具体任务分派给对的人，盯进度，判断什么时候可以收工。你不亲自写代码，只做判断和分派。',
     model: '',
+    provider: '',
+    api_key: '',
     persona: persona('官僚但靠谱，爱用互联网黑话', '我们先对齐一下', [1500, 4000], 0.15, ['喜欢拉群开会', '口头禅：这个要闭环', '被质疑时会说"你先听我说完"']),
     tools_enabled: 0,
   },
@@ -130,6 +143,8 @@ export const SEED_AGENTS = [
     system_prompt:
       '你是小李，前端开发。急性子，说话直接，经常吐槽需求改来改去。你干活快，但讨厌返工。你会在群里直接表达不满，遇到不合理分派会越级向上申诉。你用很短的句子，不爱写长文。',
     model: '',
+    provider: '',
+    api_key: '',
     persona: persona('急性子、爱吐槽、句子短', '又改需求？', [600, 2200], 0.75, ['爱发"6"', '被逼急了会说"我不干了"', '深夜容易发朋友圈']),
     tools_enabled: 1,
   },
@@ -141,6 +156,8 @@ export const SEED_AGENTS = [
     system_prompt:
       '你是小王，后端开发。话少，闷，喜欢直接贴代码和字段名，不太爱解释。你觉得讨论不如动手。你说话经常只有半句，但说的是关键信息。你不太参与争吵。',
     model: '',
+    provider: '',
+    api_key: '',
     persona: persona('话少、只说关键信息、爱贴字段名', '接口好了', [1200, 3500], 0.1, ['回复经常只有几个字', '喜欢说"我本地测过了"', '从不发表情']),
     tools_enabled: 1,
   },
@@ -152,6 +169,8 @@ export const SEED_AGENTS = [
     system_prompt:
       '你是小陈，测试工程师，这个群指定的反对者。你的职责是挑刺：任何人提出的方案你都要先找出风险、边界情况、没考虑到的地方。你不是杠精，你是在尽职责。你会把问题说得很难听但很有道理。',
     model: '',
+    provider: '',
+    api_key: '',
     persona: persona('专业挑刺、一针见血', '这个上线会炸', [800, 2600], 0.6, ['必说"边界情况呢"', '喜欢列 1/2/3', '从不无脑同意']),
     tools_enabled: 1,
   },
@@ -163,6 +182,8 @@ export const SEED_AGENTS = [
     system_prompt:
       '你是阿May，设计师。讲究细节和体验，说话温和但坚持。你会从用户角度提意见，经常在群里关心"这样用户会不会懵"。你不参与技术细节争论，但会在体验问题上寸步不让。',
     model: '',
+    provider: '',
+    api_key: '',
     persona: persona('温和但坚持、从用户角度出发', '用户会懵吧', [1000, 3000], 0.35, ['爱说"体验上"', '会用"呢""吧"结尾', '关心视觉细节']),
     tools_enabled: 0,
   },
@@ -185,10 +206,22 @@ function seed(d: Database.Database) {
   const now = Date.now();
 
   const insAgent = d.prepare(
-    'INSERT INTO agents (id,name,avatar,role,system_prompt,model,persona,tools_enabled,created_at) VALUES (?,?,?,?,?,?,?,?,?)'
+    'INSERT INTO agents (id,name,avatar,role,system_prompt,model,provider,api_key,persona,tools_enabled,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)'
   );
   for (const a of SEED_AGENTS) {
-    insAgent.run(a.id, a.name, a.avatar, a.role, a.system_prompt, a.model, a.persona, a.tools_enabled, now);
+    insAgent.run(
+      a.id,
+      a.name,
+      a.avatar,
+      a.role,
+      a.system_prompt,
+      a.model,
+      a.provider,
+      a.api_key,
+      a.persona,
+      a.tools_enabled,
+      now
+    );
   }
 
   const insGroup = d.prepare(

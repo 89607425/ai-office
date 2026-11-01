@@ -1,10 +1,12 @@
 import { NextResponse } from 'next/server';
-import { db } from '@/lib/db';
 import {
+  dmId,
   getAgents,
   getGroups,
   getMembers,
   getMessages,
+  publicAgent,
+  publicAgents,
   runtimeInfo,
 } from '@/lib/kernel';
 import { getMoments, getComments } from '@/lib/moments';
@@ -15,25 +17,26 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function GET() {
+  const agents = getAgents();
   const groups = getGroups().map((g) => ({
     ...g,
-    members: getMembers(g.id),
+    members: publicAgents(getMembers(g.id)),
     messages: getMessages(g.id),
   }));
-  const godInbox = db()
-    .prepare('SELECT * FROM god_inbox ORDER BY created_at DESC LIMIT 50')
-    .all();
-  const runs = db()
-    .prepare('SELECT * FROM runs ORDER BY created_at DESC LIMIT 20')
-    .all();
+
+  // 每个员工都是老板的一个 1-1 会话；越级汇报也落在里面
+  const dms = agents.map((a) => ({
+    id: dmId(a.id),
+    agent: publicAgent(a),
+    messages: getMessages(dmId(a.id), 100),
+  }));
 
   return NextResponse.json({
-    agents: getAgents(),
+    agents: publicAgents(agents),
     groups,
+    dms,
     moments: getMoments(),
     comments: getComments(),
-    godInbox,
-    runs,
     workspace: workspaceTree(),
     sandboxBlocks: (store.sandbox_blocks as string[]) || [],
     runtime: runtimeInfo(),

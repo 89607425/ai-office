@@ -14,9 +14,18 @@ export type Agent = {
   role: string;
   system_prompt: string;
   model: string;
+  provider: string;
+  api_key: string;
   persona: string;
   tools_enabled: number;
   created_at: number;
+};
+
+/** 发给浏览器的员工档案：永远不带 api_key 明文，只带是否配置与末四位 */
+export type AgentPublic = Omit<Agent, 'api_key'> & {
+  key_set: boolean;
+  key_hint: string;
+  binding: string;
 };
 
 export type Group = {
@@ -33,7 +42,6 @@ export type MessageKind =
   | 'system'
   | 'tool'
   | 'tool_result'
-  | 'god'
   | 'human'
   | 'appeal';
 
@@ -96,6 +104,5 @@ export type StreamEvent =
   | { type: 'typing'; group_id: string; agent_id: string; agent_name: string }
   | { type: 'moment'; moment: Moment }
   | { type: 'moment_comment'; comment: MomentComment }
-  | { type: 'god'; mail: GodMail }
   | { type: 'status'; run_id: string; status: RunStatus; round: number }
   | { type: 'log'; text: string };

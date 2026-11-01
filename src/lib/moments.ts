@@ -1,7 +1,7 @@
 import { db } from './db';
 import { chat } from './llm';
 import { emit, store } from './bus';
-import { getAgents, getMessages, parsePersona } from './kernel';
+import { bindingOf, getAgents, getMessages, parsePersona } from './kernel';
 import type { Agent, Moment, MomentComment } from './types';
 
 const uid = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -41,7 +41,7 @@ ${recent || '（群里还没人说话）'}
     ],
     temperature: 1.05,
     maxTokens: 120,
-  });
+  }, bindingOf(agent));
 
   const content = text.replace(/[""'']/g, '').trim() || '（今天没什么想说的）';
   const id = uid('mo');
@@ -77,7 +77,7 @@ async function commentLater(moment: Moment, agents: Agent[], authorId: string): 
       ],
       temperature: 1.0,
       maxTokens: 40,
-    });
+    }, bindingOf(c));
     const content = text.replace(/[""'']/g, '').trim();
     if (!content) continue;
     const id = uid('mc');
