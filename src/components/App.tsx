@@ -58,6 +58,54 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /** 把一批消息并进 state，按 id 去重，并顶掉同发送者的临时气泡 */
+  const mergeMessages = useCallback((incoming: Message[]) => {
+    if (!incoming.length) return;
+    setState((s) => {
+      if (!s) return s;
+      const known = new Set<string>();
+      for (const g of s.groups) for (const m of g.messages) known.add(m.id);
+      for (const d of s.dms) for (const m of d.messages) known.add(m.id);
+      const fresh = incoming.filter((m) => !known.has(m.id));
+      if (!fresh.length) return s;
+
+      const dropTmp = (list: Message[], m: Message) => [
+        ...list.filter((x) => !(x.id.startsWith('tmp_') && x.sender_id === m.sender_id)),
+        m,
+      ];
+      let groups = s.groups;
+      let dms = s.dms;
+      for (const m of fresh) {
+        if (m.group_id.startsWith('dm:')) {
+          dms = dms.map((d) =>
+            d.id === m.group_id ? { ...d, messages: dropTmp(d.messages, m) } : d
+          );
+        } else {
+          groups = groups.map((g) =>
+            g.id === m.group_id ? { ...g, messages: dropTmp(g.messages, m) } : g
+          );
+        }
+      }
+      return { ...s, groups, dms };
+    });
+  }, []);
+
+  /** 轮询兜底：SSE 在 dev 下会掉线，这条保证消息最迟 1.5 秒出现 */
+  useEffect(() => {
+    let last = Date.now();
+    const timer = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/tail?since=${last}`, { cache: 'no-store' });
+        const j = (await res.json()) as { messages: Message[]; now: number };
+        last = j.now || Date.now();
+        mergeMessages(j.messages ?? []);
+      } catch {
+        /* 网络抖动，下一轮再来 */
+      }
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [mergeMessages]);
+
   useEffect(() => {
     const es = new EventSource('/api/stream');
     const on = <T,>(type: string, fn: (data: T) => void) => {
@@ -104,11 +152,39 @@ export default function App() {
   const group = state?.groups.find((g) => g.id === activeSession) ?? null;
   const dm = state?.dms.find((d) => d.id === activeSession) ?? null;
 
+  // 已读状态存在浏览器本地：点进哪个私聊，那个会话的红点就消
+  const [readAt, setReadAt] = useState<Record<string, number>>({});
+  useEffect(() => {
+    try {
+      setReadAt(JSON.parse(localStorage.getItem('aiOfficeReadAt') || '{}'));
+    } catch {
+      /* 忽略损坏的本地数据 */
+    }
+  }, []);
+
+  const markRead = (id: string) => {
+    setReadAt((prev) => {
+      const next = { ...prev, [id]: Date.now() };
+      try {
+        localStorage.setItem('aiOfficeReadAt', JSON.stringify(next));
+      } catch {
+        /* 忽略 */
+      }
+      return next;
+    });
+  };
+
+  const openSession = (id: string) => {
+    setActiveSession(id);
+    markRead(id);
+  };
+
   const unreadDm = (s: DmSession) => {
     const last = s.messages[s.messages.length - 1];
-    return !!last && last.sender_id !== 'boss';
+    return !!last && last.sender_id !== 'boss' && last.created_at > (readAt[s.id] ?? 0);
   };
   const dmBadge = (state?.dms ?? []).filter(unreadDm).length;
+  const anyUnread = dmBadge > 0;
 
   return (
     <div className="flex h-screen items-center justify-center p-4">
@@ -117,7 +193,7 @@ export default function App() {
         <div className="flex w-[58px] flex-col items-center bg-[#2E2E2E] py-4">
           <Avatar id="boss" text="老" size={34} radius={5} />
           <div className="mt-6 flex flex-col gap-1">
-            <NavButton active={tab === 'chat'} onClick={() => setTab('chat')} label="消息">
+            <NavButton active={tab === 'chat'} onClick={() => setTab('chat')} label="消息" badge={anyUnread}>
               <path d="M4 5h16v11H8l-4 4V5z" fill="none" stroke="currentColor" strokeWidth="1.6" />
             </NavButton>
             <NavButton active={tab === 'contacts'} onClick={() => setTab('contacts')} label="通讯录">
@@ -153,7 +229,7 @@ export default function App() {
                     <SessionRow
                       key={g.id}
                       active={active}
-                      onClick={() => setActiveSession(g.id)}
+                      onClick={() => openSession(g.id)}
                       composite={g.members.map((m) => m.avatar)}
                       title={g.name}
                       time={last?.created_at}
@@ -170,7 +246,7 @@ export default function App() {
                   return (
                     <button
                       key={d.id}
-                      onClick={() => setActiveSession(d.id)}
+                      onClick={() => openSession(d.id)}
                       className={`flex w-full items-center gap-2 rounded px-2 py-2 text-left ${
                         active ? 'bg-[#C6C5C3]' : 'hover:bg-[#DCDBD9]'
                       }`}
@@ -255,7 +331,7 @@ export default function App() {
               groups={state?.groups ?? []}
               onReload={load}
               onOpenDm={(id) => {
-                setActiveSession(`dm:${id}`);
+                openSession(`dm:${id}`);
                 setTab('chat');
               }}
             />
@@ -333,11 +409,13 @@ function NavButton({
   onClick,
   label,
   children,
+  badge,
 }: {
   active: boolean;
   onClick: () => void;
   label: string;
   children: React.ReactNode;
+  badge?: number | boolean;
 }) {
   return (
     <button

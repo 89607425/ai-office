@@ -1,7 +1,7 @@
 import { db } from './db';
 import { chat, mode, modelName, provider } from './llm';
 import { emit, store } from './bus';
-import { parseToolCall, runTool, logSandboxBlock, stripToolBlocks } from './sandbox';
+import { parseToolCall, runTool, logSandboxBlock, stripToolBlocks, writeFile } from './sandbox';
 import { bindingLabel } from './llm';
 import type { Agent, AgentPublic, Group, Message, Persona } from './types';
 
@@ -117,11 +117,25 @@ export async function sendDm(agentId: string, content: string): Promise<void> {
   const history = getMessages(dmId(agentId), 20).slice(-12);
   const privateMem = getMemories(agentId, 'private', 4);
 
+  // 事实边界：不告诉它同事是谁，它就会编出一个"老张"来
+  const mine = db()
+    .prepare('SELECT group_id FROM group_members WHERE agent_id = ?')
+    .all(agentId) as { group_id: string }[];
+  const facts = mine
+    .map((r) => {
+      const f = groupFacts(r.group_id);
+      return `群「${getGroup(r.group_id)?.name}」：${f.roster}`;
+    })
+    .join('\n');
+  const recent = mine.length ? groupFacts(mine[0].group_id).recent : '';
+
   const sys = [
     agent.system_prompt,
     `你的说话风格：${p.tone}。口头禅：${p.catchphrase}。小习惯：${p.quirks.join('；') || '无'}。`,
-    `现在是私聊，只有你和老板两个人。你可以说在群里不敢说的话，更真实、更直接。`,
-    `严格要求：中文口语，1-3 句，不要自称 AI，不要用 Markdown。`,
+    facts ? `你所在的群和真实同事名单：\n${facts}` : '你现在不属于任何群。',
+    '**上面名单之外不存在其他同事。老板问起群里的情况，你只能说你知道的人；不知道就直说不知道，绝不许编人名、编对话、编进度。**',
+    '现在是私聊，只有你和老板两个人。你可以说在群里不敢说的话，更真实、更直接。',
+    '严格要求：中文口语，1-3 句，不要自称 AI，不要用 Markdown。',
   ].join('\n');
 
   const messages = [
@@ -130,6 +144,7 @@ export async function sendDm(agentId: string, content: string): Promise<void> {
       role: 'user' as const,
       content: `这是你和老板的私聊记录（最近几条）：
 ${history.map((m) => `${m.sender_id === 'boss' ? '老板' : agent.name}：${m.content}`).join('\n') || '（还没有聊过）'}
+${recent ? `\n群里最近的真实对话（只有这些，别的内容当作不存在）：\n${recent}` : ''}
 ${privateMem.length ? `\n你自己的记忆：\n${privateMem.map((m) => `- ${m}`).join('\n')}` : ''}
 老板刚说：${content}
 现在回复老板。`,
@@ -157,6 +172,149 @@ ${privateMem.length ? `\n你自己的记忆：\n${privateMem.map((m) => `- ${m}`
       sender_id: 'system',
       sender_name: '系统',
       content: `${agent.name} 没回上话：${String(e).slice(0, 160)}`,
+      kind: 'system',
+    });
+  }
+}
+
+/* ----------------------------- 事实边界 / @ 点名 ----------------------------- */
+
+/**
+ * 模型不知道自己有哪些同事，就会开始编人名（"老张""小王"之类）。
+ * 每次对话都必须把真实成员名单塞进去，并明确禁止编造不在名单上的人。
+ */
+export function groupFacts(groupId: string): { roster: string; recent: string } {
+  const g = getGroup(groupId);
+  const members = getMembers(groupId);
+  const roster = members
+    .map((m) => `${m.name}（${m.role}${m.id === g?.leader_id ? '，组长' : ''}）`)
+    .join('、');
+  const recent = getMessages(groupId, 200)
+    .filter((m) => m.kind === 'chat' || m.kind === 'human')
+    .slice(-10)
+    .map((m) => `${m.sender_name}：${m.content.slice(0, 120)}`)
+    .join('\n');
+  return { roster, recent };
+}
+
+/**
+ * 兜底落盘：模型经常嘴上说"我写好了"，但根本没输出工具调用块。
+ * 只要它在回复里点明了一个文件名，就把这条回复落成那个文件 —— 至少产出是真的。
+ * 注意：这是展示层之外的"补救"，不是假装它调用了工具，群里会明说是系统存的。
+ */
+export function saveMentionedFile(groupId: string, agentName: string, text: string): string | null {
+  if (!text) return null;
+  const m = /([\w\u4e00-\u9fa5-]+\.(?:md|txt|json|js|ts|py|html|css|yml|yaml|csv))/i.exec(text);
+  if (!m) return null;
+  const name = m[1].replace(/^[\\/]+/, '');
+  const res = writeFile(groupId, name, `${text}\n\n— ${agentName}`);
+  if (!res.ok) return null;
+  postMessage({
+    group_id: groupId,
+    run_id: null,
+    sender_id: 'system',
+    sender_name: '系统',
+    content: `已把 ${agentName} 的回复存成文件：${name}（${res.output}）`,
+    kind: 'system',
+  });
+  return name;
+}
+
+/** 老板在群里 @ 了某个人 —— 那个人必须当场回话，不能装没看见 */
+export async function replyInGroup(groupId: string, agentId: string, question: string): Promise<void> {
+  const g = getGroup(groupId);
+  const agent = getAgent(agentId);
+  if (!g || !agent) return;
+
+  const p = parsePersona(agent.persona);
+  const { roster, recent } = groupFacts(groupId);
+  const privateMem = getMemories(agentId, 'private', 4);
+
+  const sys = [
+    agent.system_prompt,
+    `你的说话风格：${p.tone}。口头禅：${p.catchphrase}。`,
+    `你所在的是群「${g.name}」。群里的成员只有这几个人：${roster}。`,
+    '除了上面名单里的人，不存在其他同事。你不知道的人名一律不要提，也不要编造任何人的发言。',
+    '严格要求：中文口语，像在微信群里说话，不要自称 AI，不要用 Markdown 标题。',
+    '不要只说"收到""好的""这就做"。老板要的是内容本身：要么直接在群里把结果写出来，要么真的落成文件。',
+    agent.tools_enabled
+      ? `你可以读写文件，只能写相对路径（会落在 workspace/${g.id}/ 下），绝对不能用 /Users、/Desktop 这类绝对路径。
+老板让你出文档、写代码、整理清单时，你必须真的写文件 —— 先把正文说完，再在回复最后附：
+\`\`\`json
+{"tool":"write_file","args":{"path":"tech.md","content":"文件的完整内容"}}
+\`\`\`
+不要只在嘴上说"我写好了"却什么都没做。`
+      : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const messages = [
+    { role: 'system' as const, content: sys },
+    {
+      role: 'user' as const,
+      content: `群里最近的对话：
+${recent || '（还没人说话）'}
+${privateMem.length ? `\n你自己的记忆：\n${privateMem.map((m) => `- ${m}`).join('\n')}` : ''}
+老板在群里点名问你：${question}
+现在回老板的话。`,
+    },
+  ];
+
+  try {
+    let text = await chat({ tag: 'agent', messages, temperature: 0.9, maxTokens: 1600 }, bindingOf(agent));
+
+    // 和群聊主循环一样，@ 点名也必须真的能干活 —— 这里要有工具循环
+    let wrote = false;
+    if (agent.tools_enabled) {
+      const call = parseToolCall(text);
+      if (call) {
+        const res = runTool(groupId, call);
+        if (!res.ok && /越界/.test(res.output)) logSandboxBlock(groupId, `${agent.name}: ${res.output}`);
+        postMessage({
+          group_id: groupId,
+          run_id: null,
+          sender_id: agent.id,
+          sender_name: agent.name,
+          content: `[工具] ${call.tool} ${call.args.path || ''} → ${res.output.slice(0, 200)}`,
+          kind: res.ok ? 'tool_result' : 'tool',
+        });
+        if (res.ok && call.tool === 'write_file') wrote = true;
+        const follow = await chat(
+          {
+            tag: 'agent',
+            messages: [
+              ...messages,
+              { role: 'assistant' as const, content: text },
+              { role: 'user' as const, content: `工具执行结果：${res.output}\n用一句口语告诉群里写好了，不要再输出代码块。` },
+            ],
+            temperature: 0.9,
+            maxTokens: 600,
+          },
+          bindingOf(agent)
+        );
+        text = stripToolBlocks(follow) || stripToolBlocks(text);
+      }
+    }
+
+    const finalText = stripToolBlocks(text);
+    postMessage({
+      group_id: groupId,
+      run_id: null,
+      sender_id: agent.id,
+      sender_name: agent.name,
+      content: finalText || '……',
+      kind: 'chat',
+    });
+    if (!wrote) saveMentionedFile(groupId, agent.name, finalText);
+  } catch (e) {
+    // 调不通就如实说，不要静默失败 —— 那种"群里没人理你"最难排查
+    postMessage({
+      group_id: groupId,
+      run_id: null,
+      sender_id: 'system',
+      sender_name: '系统',
+      content: `${agent.name} 没回上话：${String(e).slice(0, 180)}`,
       kind: 'system',
     });
   }
@@ -824,6 +982,7 @@ async function loop(group: Group, run: { id: string; goal: string; round: number
         content: text,
         kind: 'chat',
       });
+      saveMentionedFile(group.id, agent.name, text);
       digest.push(`${agent.name}：${text}`);
       spoken.add(agent.id);
 

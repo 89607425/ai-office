@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AgentPublic, Group, Message } from '@/lib/types';
 import Avatar from './Avatar';
+import WorkspacePanel from './WorkspacePanel';
 
 type GroupFull = Group & { members: AgentPublic[]; messages: Message[] };
 type DmSession = { id: string; agent: AgentPublic; messages: Message[] };
@@ -27,6 +28,8 @@ export default function ChatView({
   const [goal, setGoal] = useState('');
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
+  const [showWs, setShowWs] = useState(false);
+  const [files, setFiles] = useState<{ name: string; size: number }[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const messages = mode === 'group' ? group?.messages ?? [] : dm?.messages ?? [];
@@ -93,6 +96,17 @@ export default function ChatView({
     }
   }
 
+  async function openWorkspace() {
+    if (showWs) {
+      setShowWs(false);
+      return;
+    }
+    const r = await fetch(`/api/workspace?group=${encodeURIComponent(group?.id ?? '')}`);
+    const j = (await r.json()) as { files: { name: string; size: number }[] };
+    setFiles(j.files ?? []);
+    setShowWs(true);
+  }
+
   const running = runStatus?.status === 'running';
   const title = mode === 'group' ? group?.name ?? '' : dm?.agent.name ?? '';
   const subtitle =
@@ -143,6 +157,16 @@ export default function ChatView({
           ) : (
             <span className="text-[11px] text-[#8A8A8A]">只有你俩能看到 · 你说的会只进它的记忆</span>
           )}
+          {mode === 'group' && (
+            <button
+              onClick={() => void openWorkspace()}
+              className={`rounded border px-2 py-1 text-[12px] ${
+                showWs ? 'border-[#07C160] bg-[#07C160] text-white' : 'border-[#D9D9D9] bg-white text-[#6B6B6B]'
+              }`}
+            >
+              工作区
+            </button>
+          )}
         </div>
       </div>
 
@@ -161,20 +185,25 @@ export default function ChatView({
           <Row key={m.id} m={m} members={members} />
         ))}
 
-        {typing && (
-          <div className="mb-4 flex items-center gap-2">
-            <Avatar id={members.find((x) => x.name === typing)?.id ?? 'x'} text={typing.slice(0, 1)} size={34} />
-            <div className="flex items-center gap-1 rounded bg-white px-3 py-2">
-              <span className="dot h-[5px] w-[5px] rounded-full bg-[#8A8A8A]" />
-              <span className="dot h-[5px] w-[5px] rounded-full bg-[#8A8A8A]" />
-              <span className="dot h-[5px] w-[5px] rounded-full bg-[#8A8A8A]" />
-            </div>
-          </div>
-        )}
-        <div ref={bottomRef} />
+                <div ref={bottomRef} />
       </div>
 
       <div className="shrink-0 border-t border-[#E3E3E3] bg-[#F5F5F5]">
+        {mode === 'group' && members.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1 px-4 pt-2">
+            <span className="text-[11px] text-[#8A8A8A]">点名：</span>
+            {members.map((m) => (
+              <button
+                key={m.id}
+                onClick={() => setDraft((d) => (d.includes(`@${m.name}`) ? d : `${d}@${m.name} `.trimStart()))}
+                className="rounded border border-[#E0E0E0] bg-white px-1.5 py-[2px] text-[11px] text-[#576B95] hover:border-[#07C160]"
+              >
+                @{m.name}
+              </button>
+            ))}
+            <span className="ml-1 text-[10px] text-[#B0B0B0]">被 @ 的人会当场回你</span>
+          </div>
+        )}
         <div className="flex items-center gap-2 px-4 pt-2 text-[11px] text-[#8A8A8A]">
           <span>老板（你）</span>
           {mode === 'group' && <span>· 你的话会在下一轮被组长读到</span>}
@@ -206,6 +235,10 @@ export default function ChatView({
           </button>
         </div>
       </div>
+
+      {showWs && mode === 'group' && group && (
+        <WorkspacePanel groupId={group.id} files={files} onClose={() => setShowWs(false)} />
+      )}
     </>
   );
 }
