@@ -1,0 +1,10 @@
+node_modules
+.next
+.env.local
+data/*.db
+data/*.db-journal
+data/*.db-wal
+*.tsbuildinfo
+workspace/*
+!workspace/.gitkeep
+.DS_Store
