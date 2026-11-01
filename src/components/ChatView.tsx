@@ -30,6 +30,8 @@ export default function ChatView({
   const [busy, setBusy] = useState(false);
   const [showWs, setShowWs] = useState(false);
   const [files, setFiles] = useState<{ name: string; size: number }[]>([]);
+  const [showLogs, setShowLogs] = useState(false);
+  const [logs, setLogs] = useState<{ id: string; agent_name: string | null; tag: string; provider: string; model: string; attempt: number; duration_ms: number; success: number; error: string | null; created_at: number }[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const messages = mode === 'group' ? group?.messages ?? [] : dm?.messages ?? [];
@@ -107,6 +109,18 @@ export default function ChatView({
     setShowWs(true);
   }
 
+  async function openLogs() {
+    if (showLogs) {
+      setShowLogs(false);
+      return;
+    }
+    const runId = [...messages].reverse().find((m) => m.run_id)?.run_id;
+    const res = await fetch(`/api/logs${runId ? `?runId=${encodeURIComponent(runId)}` : ''}`, { cache: 'no-store' });
+    const data = (await res.json()) as { logs?: typeof logs };
+    setLogs(data.logs ?? []);
+    setShowLogs(true);
+  }
+
   const running = runStatus?.status === 'running';
   const title = mode === 'group' ? group?.name ?? '' : dm?.agent.name ?? '';
   const subtitle =
@@ -158,14 +172,24 @@ export default function ChatView({
             <span className="text-[11px] text-[#8A8A8A]">只有你俩能看到 · 你说的会只进它的记忆</span>
           )}
           {mode === 'group' && (
-            <button
-              onClick={() => void openWorkspace()}
+            <>
+              <button
+                onClick={() => void openWorkspace()}
               className={`rounded border px-2 py-1 text-[12px] ${
                 showWs ? 'border-[#07C160] bg-[#07C160] text-white' : 'border-[#D9D9D9] bg-white text-[#6B6B6B]'
               }`}
-            >
-              工作区
-            </button>
+              >
+                工作区
+              </button>
+              <button
+                onClick={() => void openLogs()}
+                className={`rounded border px-2 py-1 text-[12px] ${
+                  showLogs ? 'border-[#07C160] bg-[#07C160] text-white' : 'border-[#D9D9D9] bg-white text-[#6B6B6B]'
+                }`}
+              >
+                运行记录
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -238,6 +262,34 @@ export default function ChatView({
 
       {showWs && mode === 'group' && group && (
         <WorkspacePanel groupId={group.id} files={files} onClose={() => setShowWs(false)} />
+      )}
+      {showLogs && mode === 'group' && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/30">
+          <div className="flex h-[520px] w-[720px] flex-col rounded-lg bg-white p-5 shadow-xl">
+            <div className="mb-3 flex items-center">
+              <div>
+                <div className="text-[14px] font-medium text-[#191919]">模型调用记录</div>
+                <div className="text-[11px] text-[#8A8A8A]">不记录提示词、回复或 API Key；失败项会显示原因。</div>
+              </div>
+              <button onClick={() => setShowLogs(false)} className="ml-auto text-[12px] text-[#8A8A8A] hover:text-[#191919]">关闭</button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto rounded border border-[#EAEAEA]">
+              {!logs.length ? (
+                <div className="p-4 text-[12px] text-[#8A8A8A]">还没有模型调用记录。</div>
+              ) : logs.map((item) => (
+                <div key={item.id} className="border-b border-[#F0F0F0] px-3 py-2 text-[12px] last:border-0">
+                  <div className="flex gap-2">
+                    <span className={item.success ? 'text-[#07A853]' : 'text-[#FA5151]'}>{item.success ? '成功' : '失败'}</span>
+                    <span className="font-medium text-[#191919]">{item.agent_name || '系统'}</span>
+                    <span className="text-[#6B6B6B]">{item.provider} / {item.model}</span>
+                    <span className="ml-auto text-[#8A8A8A]">{item.duration_ms} ms · 第 {item.attempt} 次</span>
+                  </div>
+                  {!item.success && item.error && <div className="mt-1 break-all text-[#FA5151]">{item.error}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       )}
     </>
   );

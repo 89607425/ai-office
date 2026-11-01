@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { agentSummary, createAgent, deleteAgent, getAgents, publicAgents, publicAgent } from '@/lib/kernel';
+import { agentSummary, bindingOf, createAgent, deleteAgent, getAgent, getAgents, publicAgents, publicAgent, updateAgentConnection } from '@/lib/kernel';
+import { checkConnection } from '@/lib/llm';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -68,6 +69,34 @@ export async function POST(req: Request) {
       tools_enabled: body.tools_enabled,
     });
     return NextResponse.json({ ok: true, agent: publicAgent(agent) });
+  } catch (e) {
+    return NextResponse.json({ error: String(e) }, { status: 400 });
+  }
+}
+
+export async function PATCH(req: Request) {
+  const body = (await req.json().catch(() => ({}))) as {
+    id?: string;
+    action?: 'update_connection' | 'test_connection';
+    provider?: string;
+    base_url?: string;
+    model?: string;
+    api_key?: string;
+  };
+  const id = (body.id || '').trim();
+  if (!id) return NextResponse.json({ error: '缺少员工' }, { status: 400 });
+
+  const agent = getAgent(id);
+  if (!agent) return NextResponse.json({ error: '员工不存在' }, { status: 404 });
+
+  if (body.action === 'test_connection') {
+    const result = await checkConnection(bindingOf(agent));
+    return NextResponse.json(result, { status: result.ok ? 200 : 422 });
+  }
+
+  try {
+    const updated = updateAgentConnection(id, body);
+    return NextResponse.json({ ok: true, agent: publicAgent(updated) });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 400 });
   }

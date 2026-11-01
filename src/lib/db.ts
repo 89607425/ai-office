@@ -93,6 +93,34 @@ function createDb(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(group_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_moments_time ON moments(created_at);
+    CREATE TABLE IF NOT EXISTS run_jobs (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'queued',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      available_at INTEGER NOT NULL,
+      locked_until INTEGER,
+      last_error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_run_jobs_ready ON run_jobs(status, available_at);
+    CREATE TABLE IF NOT EXISTS model_call_logs (
+      id TEXT PRIMARY KEY,
+      run_id TEXT,
+      group_id TEXT,
+      agent_id TEXT,
+      agent_name TEXT,
+      tag TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      attempt INTEGER NOT NULL,
+      duration_ms INTEGER NOT NULL,
+      success INTEGER NOT NULL,
+      error TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_model_call_logs_run ON model_call_logs(run_id, created_at);
   `);
   migrate(db);
   return db;
@@ -115,6 +143,41 @@ export function db(): Database.Database {
     seed(_db);
   }
   return _db;
+}
+
+export function addModelCallLog(input: {
+  id: string;
+  runId?: string;
+  groupId?: string;
+  agentId?: string;
+  agentName?: string;
+  tag: string;
+  provider: string;
+  model: string;
+  attempt: number;
+  durationMs: number;
+  success: boolean;
+  error?: string;
+}): void {
+  db()
+    .prepare(
+      'INSERT INTO model_call_logs (id,run_id,group_id,agent_id,agent_name,tag,provider,model,attempt,duration_ms,success,error,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)'
+    )
+    .run(
+      input.id,
+      input.runId ?? null,
+      input.groupId ?? null,
+      input.agentId ?? null,
+      input.agentName ?? null,
+      input.tag,
+      input.provider,
+      input.model,
+      input.attempt,
+      input.durationMs,
+      input.success ? 1 : 0,
+      input.error?.slice(0, 500) ?? null,
+      Date.now()
+    );
 }
 
 const PERSONAS: Record<string, unknown> = {};

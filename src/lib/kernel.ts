@@ -3,7 +3,7 @@ import { chat, mode, modelName, provider } from './llm';
 import { emit, store } from './bus';
 import { parseToolCall, runTool, logSandboxBlock, stripToolBlocks, writeFile } from './sandbox';
 import { bindingLabel } from './llm';
-import type { Agent, AgentPublic, Group, Message, Persona } from './types';
+import type { Agent, AgentPublic, Group, Message, Persona, Run } from './types';
 
 export const MAX_ROUNDS = 8;
 
@@ -155,7 +155,7 @@ ${privateMem.length ? `\n你自己的记忆：\n${privateMem.map((m) => `- ${m}`
   await typing(dmId(agentId), agent, lo + Math.random() * Math.max(0, hi - lo));
 
   try {
-    const reply = await chat({ tag: 'agent', messages, temperature: 0.95 }, bindingOf(agent));
+    const reply = await chat({ tag: 'agent', messages, temperature: 0.95, audit: { agentId: agent.id, agentName: agent.name } }, bindingOf(agent));
     postMessage({
       group_id: dmId(agentId),
       run_id: null,
@@ -262,7 +262,7 @@ ${privateMem.length ? `\n你自己的记忆：\n${privateMem.map((m) => `- ${m}`
   ];
 
   try {
-    let text = await chat({ tag: 'agent', messages, temperature: 0.9, maxTokens: 1600 }, bindingOf(agent));
+    let text = await chat({ tag: 'agent', messages, temperature: 0.9, maxTokens: 1600, audit: { groupId, agentId: agent.id, agentName: agent.name } }, bindingOf(agent));
 
     // 和群聊主循环一样，@ 点名也必须真的能干活 —— 这里要有工具循环
     let wrote = false;
@@ -290,6 +290,7 @@ ${privateMem.length ? `\n你自己的记忆：\n${privateMem.map((m) => `- ${m}`
             ],
             temperature: 0.9,
             maxTokens: 600,
+            audit: { groupId, agentId: agent.id, agentName: agent.name },
           },
           bindingOf(agent)
         );
@@ -367,6 +368,24 @@ export function createAgent(input: {
       input.tools_enabled ?? 0,
       Date.now()
     );
+  return getAgent(id)!;
+}
+
+/** 更新已有员工的模型配置；空 key 表示保留旧 key，避免前端读取或回传密钥。 */
+export function updateAgentConnection(
+  id: string,
+  input: { provider?: string; base_url?: string; model?: string; api_key?: string }
+): Agent {
+  const agent = getAgent(id);
+  if (!agent) throw new Error('员工不存在');
+
+  const provider = (input.provider ?? agent.provider).trim();
+  const baseUrl = (input.base_url ?? agent.base_url).trim();
+  const model = (input.model ?? agent.model).trim();
+  const apiKey = input.api_key?.trim() || agent.api_key;
+  db()
+    .prepare('UPDATE agents SET provider = ?, base_url = ?, model = ?, api_key = ? WHERE id = ?')
+    .run(provider, baseUrl, model, apiKey, id);
   return getAgent(id)!;
 }
 
@@ -659,7 +678,7 @@ ${humanNotes.length ? `\n老板（人类管理员）的插话：\n${humanNotes.j
   let raw = '';
   try {
     raw = await chat(
-      { tag: 'leader', messages, temperature: 0.7, json: true, maxTokens: 1800 },
+      { tag: 'leader', messages, temperature: 0.7, json: true, maxTokens: 1800, audit: { runId: run.id, groupId: group.id, agentId: leader.id, agentName: leader.name } },
       bindingOf(leader)
     );
   } catch (e) {
@@ -705,7 +724,7 @@ ${privateMem.length ? `你自己的记忆：\n${privateMem.map((m) => `- ${m}`).
   ];
 
   const bind = bindingOf(agent);
-  let text = await chat({ tag: 'agent', messages, temperature: 0.9, maxTokens: 1600 }, bind);
+  let text = await chat({ tag: 'agent', messages, temperature: 0.9, maxTokens: 1600, audit: { runId: run.id, groupId: group.id, agentId: agent.id, agentName: agent.name } }, bind);
 
   // 复读检测必须放在工具执行之前：否则被丢弃的第一版回复已经把工具跑了一遍，
   // 群里会留下两条一模一样的工具消息
@@ -719,6 +738,7 @@ ${privateMem.length ? `你自己的记忆：\n${privateMem.map((m) => `- ${m}`).
           { role: 'user' as const, content: '注意：你刚才说的和之前重复了，换一个角度，说点新的。' },
         ],
         temperature: 1.0,
+        audit: { runId: run.id, groupId: group.id, agentId: agent.id, agentName: agent.name },
       },
       bind
     );
@@ -748,6 +768,7 @@ ${privateMem.length ? `你自己的记忆：\n${privateMem.map((m) => `- ${m}`).
             { role: 'user' as const, content: `工具执行结果：${res.output}\n现在用一句口语把结果说给群里听，不要再输出代码块。` },
           ],
           temperature: 0.9,
+          audit: { runId: run.id, groupId: group.id, agentId: agent.id, agentName: agent.name },
         },
         bind
       );
@@ -817,6 +838,7 @@ ${grievances.map((x) => `- ${x}`).join('\n')}
       ],
       temperature: 1.0,
       maxTokens: 200,
+      audit: { runId: run.id, groupId: group.id, agentId: agent.id, agentName: agent.name },
     },
     bindingOf(agent)
   );
@@ -849,6 +871,12 @@ export function stopRun(runId: string): void {
   const s = runState(runId);
   s.stopped = true;
   setStatus(runId, 'done', 0);
+  db().prepare("UPDATE run_jobs SET status = 'cancelled', updated_at = ? WHERE run_id = ? AND status IN ('queued','running')").run(Date.now(), runId);
+}
+
+function runIsActive(runId: string): boolean {
+  const row = db().prepare('SELECT status FROM runs WHERE id = ?').get(runId) as { status?: string } | undefined;
+  return row?.status === 'running' && !runState(runId).stopped;
 }
 
 export async function startRun(groupId: string, goal: string): Promise<string> {
@@ -870,23 +898,72 @@ export async function startRun(groupId: string, goal: string): Promise<string> {
   });
   setStatus(runId, 'running', 0);
 
-  void loop(group, { id: runId, goal, round: 0 }).catch((e) => {
-    log(`内核异常：${String(e)}`);
-    setStatus(runId, 'error', 0);
-  });
+  const now = Date.now();
+  db()
+    .prepare('INSERT INTO run_jobs (id,run_id,status,attempts,available_at,locked_until,last_error,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(uid('job'), runId, 'queued', 0, now, null, null, now, now);
 
   return runId;
 }
 
+/**
+ * 从 SQLite 领取一个任务并执行。任务、锁和重试状态都在数据库中，进程重启后不会丢；
+ * 本地由浏览器轮询触发，部署时可由 cron/独立 worker 调用 /api/worker。
+ */
+export async function processOneRunJob(): Promise<{ processed: boolean; runId?: string; status?: string }> {
+  const d = db();
+  const now = Date.now();
+  const job = d
+    .prepare("SELECT * FROM run_jobs WHERE (status = 'queued' AND available_at <= ?) OR (status = 'running' AND locked_until < ?) ORDER BY available_at ASC LIMIT 1")
+    .get(now, now) as { id: string; run_id: string; attempts: number } | undefined;
+  if (!job) return { processed: false };
+
+  const claimed = d
+    .prepare("UPDATE run_jobs SET status = 'running', attempts = attempts + 1, locked_until = ?, updated_at = ? WHERE id = ? AND (status = 'queued' OR (status = 'running' AND locked_until < ?))")
+    // 单个群任务会连续调用多个模型；租约覆盖长任务，避免第二个浏览器重复领取。
+    .run(now + 2 * 60 * 60_000, now, job.id, now);
+  if (!claimed.changes) return { processed: false };
+
+  const run = d.prepare('SELECT * FROM runs WHERE id = ?').get(job.run_id) as Run | undefined;
+  if (!run || run.status !== 'running') {
+    d.prepare("UPDATE run_jobs SET status = 'cancelled', locked_until = NULL, updated_at = ? WHERE id = ?").run(Date.now(), job.id);
+    return { processed: true, runId: job.run_id, status: 'cancelled' };
+  }
+  const group = getGroup(run.group_id);
+  if (!group) {
+    setStatus(run.id, 'error', run.round);
+    d.prepare("UPDATE run_jobs SET status = 'failed', locked_until = NULL, last_error = ?, updated_at = ? WHERE id = ?").run('群不存在', Date.now(), job.id);
+    return { processed: true, runId: run.id, status: 'failed' };
+  }
+
+  try {
+    await loop(group, { id: run.id, goal: run.goal, round: run.round });
+    d.prepare("UPDATE run_jobs SET status = 'done', locked_until = NULL, updated_at = ? WHERE id = ?").run(Date.now(), job.id);
+    return { processed: true, runId: run.id, status: 'done' };
+  } catch (error) {
+    const attempts = job.attempts + 1;
+    const message = String(error).slice(0, 500);
+    if (attempts >= 3) {
+      setStatus(run.id, 'error', run.round);
+      d.prepare("UPDATE run_jobs SET status = 'failed', locked_until = NULL, last_error = ?, updated_at = ? WHERE id = ?").run(message, Date.now(), job.id);
+      return { processed: true, runId: run.id, status: 'failed' };
+    }
+    const retryAt = Date.now() + attempts * 5_000;
+    d.prepare("UPDATE run_jobs SET status = 'queued', available_at = ?, locked_until = NULL, last_error = ?, updated_at = ? WHERE id = ?").run(retryAt, message, Date.now(), job.id);
+    return { processed: true, runId: run.id, status: 'retrying' };
+  }
+}
+
 async function loop(group: Group, run: { id: string; goal: string; round: number }): Promise<void> {
   const members = getMembers(group.id);
-  const digest: string[] = [];
-  const spoken = new Set<string>();
+  const previous = getMessages(group.id, 500).filter((m) => m.run_id === run.id && m.kind === 'chat');
+  const digest: string[] = previous.map((m) => `${m.sender_name}：${m.content}`);
+  const spoken = new Set(previous.map((m) => m.sender_id));
   const instructionLog: Record<string, string[]> = {};
-  let round = 0;
+  let round = run.round;
 
   while (round < MAX_ROUNDS) {
-    if (runState(run.id).stopped) return;
+    if (!runIsActive(run.id)) return;
     round++;
     run.round = round;
     setStatus(run.id, 'running', round);
@@ -964,7 +1041,7 @@ async function loop(group: Group, run: { id: string; goal: string; round: number
     }
 
     for (const item of items.slice(0, 4)) {
-      if (runState(run.id).stopped) return;
+      if (!runIsActive(run.id)) return;
       const agent = getAgent(item.to);
       if (!agent) continue;
       const p = parsePersona(agent.persona);

@@ -30,6 +30,7 @@ export default function App() {
   const [typing, setTyping] = useState<{ id: string; name: string } | null>(null);
   const [runStatus, setRunStatus] = useState<{ status: string; round: number } | null>(null);
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const workerBusy = useRef(false);
 
   const load = useCallback(async () => {
     const res = await fetch('/api/state', { cache: 'no-store' });
@@ -105,6 +106,25 @@ export default function App() {
     }, 1500);
     return () => clearInterval(timer);
   }, [mergeMessages]);
+
+  // 本地模式由已打开的界面驱动持久化 worker；服务重启后队列会从 SQLite 继续。
+  // 生产环境可用 cron 或独立 worker 调用同一个接口，不依赖浏览器常驻。
+  useEffect(() => {
+    const work = async () => {
+      if (workerBusy.current) return;
+      workerBusy.current = true;
+      try {
+        await fetch('/api/worker', { method: 'POST' });
+      } catch {
+        /* worker 下一轮会自动重试 */
+      } finally {
+        workerBusy.current = false;
+      }
+    };
+    void work();
+    const timer = setInterval(() => void work(), 2000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const es = new EventSource('/api/stream');

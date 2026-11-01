@@ -1,3 +1,5 @@
+import { addModelCallLog } from './db';
+
 export type ChatMsg = { role: 'system' | 'user' | 'assistant'; content: string };
 
 export type LLMMode = 'live' | 'demo';
@@ -10,6 +12,8 @@ export type LLMCall = {
   json?: boolean;
   /** 演示模式用的上下文提示，真实模式忽略 */
   hint?: string;
+  /** 仅记录元信息，不记录提示词或回复内容。 */
+  audit?: { runId?: string; groupId?: string; agentId?: string; agentName?: string };
 };
 
 const PROVIDERS: Record<string, { baseURL: string; model: string }> = {
@@ -71,9 +75,75 @@ export function mode(): LLMMode {
   return process.env.LLM_API_KEY ? 'live' : 'demo';
 }
 
+/**
+ * 只检查密钥和网关是否可用，不发送聊天内容、也不消耗模型 token。
+ * OpenAI-compatible 服务通常都支持 /models；即使服务端没实现该端点，也会明确说明。
+ */
+export async function checkConnection(binding?: Binding): Promise<{ ok: boolean; message: string }> {
+  const r = resolve(binding);
+  if (r.mode === 'demo') return { ok: false, message: '未配置 API Key，目前会使用演示模式。' };
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15_000);
+  try {
+    const res = await fetch(`${r.baseURL.replace(/\/$/, '')}/models`, {
+      headers: { Authorization: `Bearer ${r.key}` },
+      signal: ctrl.signal,
+    });
+    const body = await res.text().catch(() => '');
+    if (res.ok) {
+      // 有些服务会接受 key 但不提供所选模型；提前报出来，避免到群聊里才发现。
+      try {
+        const json = JSON.parse(body) as { data?: { id?: string }[] };
+        const available = json.data?.map((item) => item.id).filter((id): id is string => !!id) ?? [];
+        if (available.length && r.model && !available.includes(r.model)) {
+          return { ok: false, message: `鉴权正常，但模型「${r.model}」不在当前账户可用列表中。` };
+        }
+      } catch {
+        // 有的兼容服务返回的不是标准 JSON；HTTP 成功仍可视为网关可用。
+      }
+      return { ok: true, message: `连接正常：${r.label}` };
+    }
+
+    const detail = body.replace(/\s+/g, ' ').slice(0, 180);
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, message: `鉴权失败（HTTP ${res.status}）：请检查或更新 API Key。` };
+    }
+    return { ok: false, message: `连接失败（HTTP ${res.status}）${detail ? `：${detail}` : ''}` };
+  } catch (error) {
+    const reason = error instanceof Error && error.name === 'AbortError' ? '连接超时（15 秒）' : '无法连接到模型服务';
+    return { ok: false, message: reason };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function chat(call: LLMCall, binding?: Binding): Promise<string> {
   const r = resolve(binding);
-  if (r.mode === 'demo') return demoEngine(call);
+  const writeLog = (attempt: number, startedAt: number, success: boolean, error?: unknown) => {
+    addModelCallLog({
+      id: `llm_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+      ...call.audit,
+      tag: call.tag,
+      provider: r.provider,
+      model: r.model,
+      attempt,
+      durationMs: Date.now() - startedAt,
+      success,
+      error: error ? String(error) : undefined,
+    });
+  };
+  if (r.mode === 'demo') {
+    const startedAt = Date.now();
+    try {
+      const out = demoEngine(call);
+      writeLog(1, startedAt, true);
+      return out;
+    } catch (error) {
+      writeLog(1, startedAt, false, error);
+      throw error;
+    }
+  }
 
   const url = r.baseURL.replace(/\/$/, '') + '/chat/completions';
   const body: Record<string, unknown> = {
@@ -88,8 +158,10 @@ export async function chat(call: LLMCall, binding?: Binding): Promise<string> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 120000);
 
-  const call1 = async (payload: Record<string, unknown>): Promise<string> => {
-    const res = await fetch(url, {
+  const call1 = async (payload: Record<string, unknown>, attempt: number): Promise<string> => {
+    const startedAt = Date.now();
+    try {
+      const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -98,25 +170,30 @@ export async function chat(call: LLMCall, binding?: Binding): Promise<string> {
       body: JSON.stringify(payload),
       signal: ctrl.signal,
     });
-    if (!res.ok) {
-      const t = await res.text().catch(() => '');
-      throw new Error(`LLM ${res.status}: ${t.slice(0, 300)}`);
+      if (!res.ok) {
+        const t = await res.text().catch(() => '');
+        throw new Error(`LLM ${res.status}: ${t.slice(0, 300)}`);
+      }
+      const json = (await res.json()) as {
+        choices?: { message?: { content?: string; reasoning_content?: string } }[];
+      };
+      const msg = json.choices?.[0]?.message ?? {};
+      const content = (msg.content ?? '').trim();
+      writeLog(attempt, startedAt, true);
+      if (!content && msg.reasoning_content) return '';
+      return content;
+    } catch (error) {
+      writeLog(attempt, startedAt, false, error);
+      throw error;
     }
-    const json = (await res.json()) as {
-      choices?: { message?: { content?: string; reasoning_content?: string } }[];
-    };
-    const msg = json.choices?.[0]?.message ?? {};
-    const content = (msg.content ?? '').trim();
-    if (!content && msg.reasoning_content) return ''; // 推理模型把预算全花在思考上了
-    return content;
   };
 
   try {
-    let out = await call1(body);
+    let out = await call1(body, 1);
     if (!out) {
       // 推理模型（deepseek-v4-pro 这类）会把 token 全烧在 reasoning 上，
       // content 直接为空。加大预算再要一次，否则组长永远吐不出 JSON。
-      out = await call1({ ...body, max_tokens: Math.min(8000, (call.maxTokens ?? 700) * 4) });
+      out = await call1({ ...body, max_tokens: Math.min(8000, (call.maxTokens ?? 700) * 4) }, 2);
     }
     return out;
   } finally {

@@ -39,6 +39,7 @@ export default function ContactsView({
   const [loadingSummary, setLoadingSummary] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmGroup, setConfirmGroup] = useState<GroupFull | null>(null);
+  const [connectionTarget, setConnectionTarget] = useState<AgentPublic | null>(null);
 
   async function openDelete(a: AgentPublic) {
     setPending(a);
@@ -108,6 +109,14 @@ export default function ContactsView({
           {panel === 'group' && (
             <NewGroupForm agents={agents} onDone={() => { setPanel('none'); onReload(); }} />
           )}
+          {connectionTarget && (
+            <ConnectionForm
+              key={connectionTarget.id}
+              agent={connectionTarget}
+              onSaved={onReload}
+              onCancel={() => setConnectionTarget(null)}
+            />
+          )}
 
           <section>
             <div className="mb-2 text-[12px] text-[#8A8A8A]">员工（{agents.length}）</div>
@@ -137,6 +146,12 @@ export default function ContactsView({
                     </div>
                   </div>
                   <div className="flex shrink-0 flex-col gap-1">
+                    <button
+                      onClick={() => setConnectionTarget(a)}
+                      className="rounded border border-[#D9D9D9] px-2 py-1 text-[11px] text-[#6B6B6B] hover:border-[#07C160] hover:text-[#07C160]"
+                    >
+                      配置连接
+                    </button>
                     <button
                       onClick={() => onOpenDm(a.id)}
                       className="rounded border border-[#D9D9D9] px-2 py-1 text-[11px] text-[#6B6B6B] hover:border-[#07C160] hover:text-[#07C160]"
@@ -265,6 +280,102 @@ export default function ContactsView({
         </div>
       )}
     </>
+  );
+}
+
+function ConnectionForm({
+  agent,
+  onSaved,
+  onCancel,
+}: {
+  agent: AgentPublic;
+  onSaved: () => void;
+  onCancel: () => void;
+}) {
+  const [f, setF] = useState({
+    provider: agent.provider || 'deepseek',
+    base_url: agent.base_url || '',
+    model: agent.model || '',
+    api_key: '',
+  });
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const set = (k: keyof typeof f, v: string) => setF((prev) => ({ ...prev, [k]: v }));
+
+  async function save() {
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const res = await fetch('/api/agents', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: agent.id, action: 'update_connection', ...f }),
+      });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) throw new Error(data.error || '保存失败');
+      setNotice('已保存。建议立即点击“检测连接”。');
+      onSaved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '保存失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function test() {
+    setBusy(true);
+    setError('');
+    setNotice('正在检测…');
+    try {
+      const res = await fetch('/api/agents', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: agent.id, action: 'test_connection' }),
+      });
+      const data = (await res.json()) as { ok?: boolean; message?: string; error?: string };
+      const message = data.message || data.error || '检测失败';
+      if (!res.ok || !data.ok) throw new Error(message);
+      setNotice(message);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '检测失败');
+      setNotice('');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-[#07C160] bg-white p-4">
+      <div className="mb-1 text-[13.5px] font-medium text-[#191919]">配置 {agent.name} 的模型连接</div>
+      <div className="mb-3 text-[11px] text-[#8A8A8A]">现有密钥不会展示；留空即保留原密钥。检测不会发送聊天内容。</div>
+      <div className="grid grid-cols-3 gap-3">
+        <Field label="厂商">
+          <select value={f.provider} onChange={(e) => set('provider', e.target.value)} className={inputCls}>
+            {PROVIDERS.filter((p) => p.id).map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+          </select>
+        </Field>
+        <Field label="模型">
+          <input value={f.model} onChange={(e) => set('model', e.target.value)} placeholder={DEFAULT_MODELS[f.provider] ?? ''} className={inputCls} />
+        </Field>
+        <Field label="新的 API Key">
+          <input type="password" value={f.api_key} onChange={(e) => set('api_key', e.target.value)} placeholder={agent.key_set ? `当前 ${agent.key_hint}` : 'sk-...'} className={inputCls} />
+        </Field>
+      </div>
+      <div className="mt-3">
+        <Field label="接口地址（自定义厂商时必填）">
+          <input value={f.base_url} onChange={(e) => set('base_url', e.target.value)} placeholder="留空使用官方默认地址" className={inputCls} />
+        </Field>
+      </div>
+      {notice && <div className="mt-2 text-[12px] text-[#07A853]">{notice}</div>}
+      {error && <div className="mt-2 text-[12px] text-[#FA5151]">{error}</div>}
+      <div className="mt-3 flex gap-2">
+        <button onClick={() => void save()} disabled={busy} className="rounded bg-[#07C160] px-4 py-1.5 text-[12.5px] text-white disabled:opacity-40">保存</button>
+        <button onClick={() => void test()} disabled={busy} className="rounded border border-[#07C160] px-3 py-1.5 text-[12.5px] text-[#07A853] disabled:opacity-40">检测连接</button>
+        <button onClick={onCancel} disabled={busy} className="rounded border border-[#D9D9D9] px-3 py-1.5 text-[12.5px] text-[#8A8A8A]">取消</button>
+      </div>
+    </div>
   );
 }
 
