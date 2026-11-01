@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
-import { getGroup, postMessage, startRun, stopRun } from '@/lib/kernel';
-import { startHeartbeat } from '@/lib/moments';
+import { getGroup, startRun, stopRun } from '@/lib/kernel';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -27,8 +26,8 @@ export async function POST(req: Request) {
   const group = getGroup(groupId);
   if (!group) return NextResponse.json({ error: '群不存在' }, { status: 404 });
 
+  // 注意：这里不再自动启动朋友圈心跳 —— 那玩意儿纯烧 token，默认关着，想看手动开
   const runId = await startRun(groupId, goal);
-  startHeartbeat();
   return NextResponse.json({ ok: true, runId });
 }
 

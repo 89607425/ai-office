@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { postMessage } from '@/lib/kernel';
+import { applyDirective } from '@/lib/directive';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -27,5 +28,8 @@ export async function POST(req: Request) {
     kind: 'human',
   });
 
-  return NextResponse.json({ ok: true });
+  // 老板点名的要求要落进那个员工的记忆；如果是调岗，连档案一起改
+  const notes = await applyDirective(content, { groupId });
+
+  return NextResponse.json({ ok: true, notes });
 }

@@ -1,5 +1,5 @@
 node_modules
-.next
+.next*
 .env.local
 data/*.db
 data/*.db-journal

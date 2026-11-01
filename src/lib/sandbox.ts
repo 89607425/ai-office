@@ -16,8 +16,27 @@ function safeId(s: string): string {
 
 export type ToolResult = { ok: boolean; output: string };
 
-/** 路径白名单：解析后必须落在工作目录内 */
+/**
+ * 额外允许的根目录。默认只有 workspace/<群>，
+ * 想让它往别处写（比如桌面）就在 .env.local 里加：
+ *   SANDBOX_EXTRA_ROOTS=/Users/houjunyi/Desktop
+ * 多个用逗号分隔。**开了就等于把那个目录交给模型，自己掂量。**
+ */
+function extraRoots(): string[] {
+  return (process.env.SANDBOX_EXTRA_ROOTS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => path.resolve(s));
+}
+
+/** 路径白名单：工作目录内，或显式落在额外根目录内 */
 function resolveSafe(group_id: string, rel: string): string | null {
+  if (path.isAbsolute(rel)) {
+    const abs = path.resolve(rel);
+    const ok = extraRoots().some((r) => abs === r || abs.startsWith(r + path.sep));
+    return ok ? abs : null;
+  }
   const root = rootFor(group_id);
   const abs = path.resolve(root, rel);
   if (abs !== root && !abs.startsWith(root + path.sep)) return null;
@@ -84,10 +103,24 @@ export function workspaceTree(): { name: string; size: number }[] {
 /** agent 输出里最后一个 ```json 代码块会被当作工具调用 */
 export type ToolCall = { tool: 'read_file' | 'write_file' | 'list_files'; args: Record<string, string> };
 
+/**
+ * 输出被 max_tokens 截断时，最后一个代码块常常没有闭合的 ```。
+ * 这种情况下不能整个丢掉 —— 截到最后一个 } 再试着解析。
+ */
 export function parseToolCall(text: string): ToolCall | null {
   const blocks = [...text.matchAll(/```json\s*([\s\S]*?)```/g)];
-  if (!blocks.length) return null;
-  const raw = blocks[blocks.length - 1][1];
+  let raw = blocks.length ? blocks[blocks.length - 1][1] : '';
+
+  if (!raw) {
+    const open = text.lastIndexOf('```json');
+    if (open >= 0) {
+      const rest = text.slice(open + 7);
+      const last = rest.lastIndexOf('}');
+      if (last > 0) raw = rest.slice(0, last + 1);
+    }
+  }
+  if (!raw) return null;
+
   try {
     const obj = JSON.parse(raw) as ToolCall;
     if (!obj || typeof obj.tool !== 'string') return null;
@@ -96,6 +129,14 @@ export function parseToolCall(text: string): ToolCall | null {
   } catch {
     return null;
   }
+}
+
+/** 把工具代码块从展示文本里清掉，包括那些没闭合的 */
+export function stripToolBlocks(text: string): string {
+  let out = text.replace(/```json[\s\S]*?```/g, '');
+  const open = out.lastIndexOf('```json');
+  if (open >= 0) out = out.slice(0, open);
+  return out.trim();
 }
 
 export function runTool(group_id: string, call: ToolCall): ToolResult {

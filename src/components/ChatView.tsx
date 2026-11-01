@@ -14,6 +14,7 @@ export default function ChatView({
   typing,
   runStatus,
   onReload,
+  onOptimistic,
 }: {
   mode: 'group' | 'dm';
   group?: GroupFull;
@@ -21,6 +22,7 @@ export default function ChatView({
   typing: string | null;
   runStatus: { status: string; round: number } | null;
   onReload: () => void;
+  onOptimistic: (m: Message) => void;
 }) {
   const [goal, setGoal] = useState('');
   const [draft, setDraft] = useState('');
@@ -59,6 +61,21 @@ export default function ChatView({
     const t = draft.trim();
     if (!t) return;
     setDraft('');
+    const sessionId = mode === 'group' ? group?.id : dm?.id;
+    if (sessionId) {
+      // 先插一条临时气泡，发出去那一刻就能看见，不用等服务端往返
+      onOptimistic({
+        id: `tmp_${Date.now()}`,
+        group_id: sessionId,
+        run_id: null,
+        sender_id: 'boss',
+        sender_name: '老板',
+        content: t,
+        kind: 'human',
+        created_at: Date.now(),
+        meta: null,
+      });
+    }
     if (mode === 'group' && group) {
       await fetch('/api/human', {
         method: 'POST',

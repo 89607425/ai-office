@@ -15,6 +15,7 @@ export type Agent = {
   system_prompt: string;
   model: string;
   provider: string;
+  base_url: string;
   api_key: string;
   persona: string;
   tools_enabled: number;

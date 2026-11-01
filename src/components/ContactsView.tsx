@@ -7,17 +7,19 @@ import Avatar, { colorOf } from './Avatar';
 type GroupFull = Group & { members: AgentPublic[]; messages: { id: string }[] };
 
 const PROVIDERS = [
-  { id: '', label: '不单独指定（用全局兜底）' },
   { id: 'deepseek', label: 'DeepSeek' },
   { id: 'moonshot', label: 'Kimi / Moonshot' },
   { id: 'qwen', label: '通义千问' },
-  { id: 'custom', label: '自定义（填 .env 里的 LLM_BASE_URL）' },
+  { id: 'siliconflow', label: '硅基流动' },
+  { id: 'custom', label: '自定义（自己填接口地址）' },
+  { id: '', label: '不单独指定（用全局兜底）' },
 ];
 
 const DEFAULT_MODELS: Record<string, string> = {
   deepseek: 'deepseek-chat',
   moonshot: 'moonshot-v1-8k',
   qwen: 'qwen-plus',
+  siliconflow: 'zai-org/GLM-5.3-Flash',
 };
 
 export default function ContactsView({
@@ -32,6 +34,46 @@ export default function ContactsView({
   onOpenDm: (agentId: string) => void;
 }) {
   const [panel, setPanel] = useState<'none' | 'agent' | 'group'>('none');
+  const [pending, setPending] = useState<AgentPublic | null>(null);
+  const [summary, setSummary] = useState<{ stats: Record<string, number>; summary: string } | null>(null);
+  const [loadingSummary, setLoadingSummary] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmGroup, setConfirmGroup] = useState<GroupFull | null>(null);
+
+  async function openDelete(a: AgentPublic) {
+    setPending(a);
+    setSummary(null);
+    setLoadingSummary(true);
+    try {
+      const res = await fetch('/api/agents', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: a.id }),
+      });
+      const j = (await res.json()) as { stats?: Record<string, number>; summary?: string };
+      setSummary({ stats: j.stats ?? {}, summary: j.summary ?? '' });
+    } catch {
+      setSummary({ stats: {}, summary: '（没能生成总结）' });
+    }
+    setLoadingSummary(false);
+  }
+
+  async function doDelete() {
+    if (!pending) return;
+    setDeleting(true);
+    await fetch(`/api/agents?id=${encodeURIComponent(pending.id)}`, { method: 'DELETE' });
+    setDeleting(false);
+    setPending(null);
+    setSummary(null);
+    onReload();
+  }
+
+  async function doDeleteGroup() {
+    if (!confirmGroup) return;
+    await fetch(`/api/groups?id=${encodeURIComponent(confirmGroup.id)}`, { method: 'DELETE' });
+    setConfirmGroup(null);
+    onReload();
+  }
 
   return (
     <>
@@ -94,12 +136,20 @@ export default function ContactsView({
                       {a.key_set ? `自带 key ${a.key_hint}` : '未配 key（走全局或演示模式）'}
                     </div>
                   </div>
-                  <button
-                    onClick={() => onOpenDm(a.id)}
-                    className="shrink-0 rounded border border-[#D9D9D9] px-2 py-1 text-[11px] text-[#6B6B6B] hover:border-[#07C160] hover:text-[#07C160]"
-                  >
-                    私聊
-                  </button>
+                  <div className="flex shrink-0 flex-col gap-1">
+                    <button
+                      onClick={() => onOpenDm(a.id)}
+                      className="rounded border border-[#D9D9D9] px-2 py-1 text-[11px] text-[#6B6B6B] hover:border-[#07C160] hover:text-[#07C160]"
+                    >
+                      私聊
+                    </button>
+                    <button
+                      onClick={() => void openDelete(a)}
+                      className="rounded border border-[#D9D9D9] px-2 py-1 text-[11px] text-[#8A8A8A] hover:border-[#FA5151] hover:text-[#FA5151]"
+                    >
+                      删除
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -128,12 +178,92 @@ export default function ContactsView({
                       {g.members.find((m) => m.id === g.critic_id)?.name ?? '—'} · {g.members.length} 人
                     </div>
                   </div>
+                  <button
+                    onClick={() => setConfirmGroup(g)}
+                    className="shrink-0 rounded border border-[#D9D9D9] px-2 py-1 text-[11px] text-[#8A8A8A] hover:border-[#FA5151] hover:text-[#FA5151]"
+                  >
+                    删除
+                  </button>
                 </div>
               ))}
             </div>
           </section>
         </div>
       </div>
+
+      {pending && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/30">
+          <div className="w-[480px] rounded-lg bg-white p-5 shadow-xl">
+            <div className="mb-1 text-[14px] font-medium text-[#191919]">
+              确认删除 {pending.name}？
+            </div>
+            <div className="mb-3 text-[11px] text-[#8A8A8A]">
+              它在群里发过的聊天记录会保留，但私聊、朋友圈、私有记忆会一起清掉。它当组长的群会自动交给其他成员。
+            </div>
+
+            {loadingSummary ? (
+              <div className="rounded bg-[#F7F7F7] p-3 text-[12px] text-[#8A8A8A]">正在提炼它的工作总结…</div>
+            ) : (
+              <div className="rounded bg-[#F7F7F7] p-3">
+                <div className="mb-2 flex flex-wrap gap-3 text-[11px] text-[#6B6B6B]">
+                  {Object.entries(summary?.stats ?? {}).map(([k, v]) => (
+                    <span key={k}>
+                      {k} <b className="text-[#191919]">{v}</b>
+                    </span>
+                  ))}
+                </div>
+                <div className="whitespace-pre-wrap text-[12.5px] leading-relaxed text-[#191919]">
+                  {summary?.summary}
+                </div>
+              </div>
+            )}
+
+            <div className="mt-4 flex items-center gap-2">
+              <button
+                onClick={() => void doDelete()}
+                disabled={deleting || loadingSummary}
+                className="rounded bg-[#FA5151] px-4 py-1.5 text-[12.5px] text-white hover:bg-[#E04848] disabled:opacity-40"
+              >
+                {deleting ? '删除中' : '确认删除'}
+              </button>
+              <button
+                onClick={() => {
+                  setPending(null);
+                  setSummary(null);
+                }}
+                className="rounded border border-[#D9D9D9] px-3 py-1.5 text-[12.5px] text-[#8A8A8A]"
+              >
+                再想想
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmGroup && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/30">
+          <div className="w-[420px] rounded-lg bg-white p-5 shadow-xl">
+            <div className="mb-1 text-[14px] font-medium text-[#191919]">
+              确认解散「{confirmGroup.name}」？
+            </div>
+            <div className="mb-4 text-[11px] text-[#8A8A8A]">群里的聊天记录会一并清掉，员工本身不受影响。</div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void doDeleteGroup()}
+                className="rounded bg-[#FA5151] px-4 py-1.5 text-[12.5px] text-white hover:bg-[#E04848]"
+              >
+                确认解散
+              </button>
+              <button
+                onClick={() => setConfirmGroup(null)}
+                className="rounded border border-[#D9D9D9] px-3 py-1.5 text-[12.5px] text-[#8A8A8A]"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -144,6 +274,7 @@ function NewAgentForm({ onDone }: { onDone: () => void }) {
     role: '',
     system_prompt: '',
     provider: 'deepseek',
+    base_url: '',
     api_key: '',
     model: '',
     sassiness: 0.3,
@@ -196,6 +327,25 @@ function NewAgentForm({ onDone }: { onDone: () => void }) {
         </Field>
       </div>
 
+      <div className="mt-3 grid grid-cols-2 gap-3">
+        <Field label="接口地址（硅基流动 / 自定义时必填）">
+          <input
+            value={f.base_url}
+            onChange={(e) => set('base_url', e.target.value)}
+            placeholder="https://api.siliconflow.cn/v1"
+            className={inputCls}
+          />
+        </Field>
+        <Field label="模型（留空用厂商默认）">
+          <input
+            value={f.model}
+            onChange={(e) => set('model', e.target.value)}
+            placeholder={DEFAULT_MODELS[f.provider] ?? ''}
+            className={inputCls}
+          />
+        </Field>
+      </div>
+
       <div className="mt-3 grid grid-cols-3 gap-3">
         <Field label="厂商">
           <select
@@ -222,18 +372,10 @@ function NewAgentForm({ onDone }: { onDone: () => void }) {
             className={inputCls}
           />
         </Field>
-        <Field label={`模型（留空用 ${DEFAULT_MODELS[f.provider] ?? '默认'}）`}>
-          <input
-            value={f.model}
-            onChange={(e) => set('model', e.target.value)}
-            placeholder={DEFAULT_MODELS[f.provider] ?? ''}
-            className={inputCls}
-          />
-        </Field>
       </div>
 
       <div className="mt-3 grid grid-cols-3 gap-3">
-        <Field label={`怨气值 ${f.sassiness.toFixed(2)}（越高越爱越级汇报）`}>
+        <Field label={`怨气值 ${f.sassiness.toFixed(2)}（越高越容易忍不了）`}>
           <input
             type="range"
             min={0}

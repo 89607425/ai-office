@@ -40,6 +40,19 @@ export default function App() {
     }
   }, [activeSession]);
 
+  /** 发送后先把气泡插进界面，不等服务端；真消息到了再把它顶掉 */
+  const pushOptimistic = useCallback((m: Message) => {
+    setState((s) =>
+      s
+        ? {
+            ...s,
+            groups: s.groups.map((g) => (g.id === m.group_id ? { ...g, messages: [...g.messages, m] } : g)),
+            dms: s.dms.map((d) => (d.id === m.group_id ? { ...d, messages: [...d.messages, m] } : d)),
+          }
+        : s
+    );
+  }, []);
+
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -58,12 +71,17 @@ export default function App() {
     };
 
     on<Message>('message', (m) => {
+      // 真消息到了，用它顶掉同一会话里同一发送者的临时气泡
+      const dropTmp = (list: Message[]) => [
+        ...list.filter((x) => !(x.id.startsWith('tmp_') && x.sender_id === m.sender_id)),
+        m,
+      ];
       setState((s) =>
         s
           ? {
               ...s,
-              groups: s.groups.map((g) => (g.id === m.group_id ? { ...g, messages: [...g.messages, m] } : g)),
-              dms: s.dms.map((d) => (d.id === m.group_id ? { ...d, messages: [...d.messages, m] } : d)),
+              groups: s.groups.map((g) => (g.id === m.group_id ? { ...g, messages: dropTmp(g.messages) } : g)),
+              dms: s.dms.map((d) => (d.id === m.group_id ? { ...d, messages: dropTmp(d.messages) } : d)),
             }
           : s
       );
@@ -199,7 +217,7 @@ export default function App() {
         </div>
 
         {/* 主区域 */}
-        <div className="flex min-w-0 flex-1 flex-col bg-[#F5F5F5]">
+        <div className="relative flex min-w-0 flex-1 flex-col bg-[#F5F5F5]">
           {tab === 'chat' && group && (
             <ChatView
               mode="group"
@@ -207,6 +225,7 @@ export default function App() {
               typing={typing?.id === group.id ? typing.name : null}
               runStatus={runStatus}
               onReload={load}
+              onOptimistic={pushOptimistic}
             />
           )}
           {tab === 'chat' && dm && (
@@ -216,6 +235,7 @@ export default function App() {
               typing={typing?.id === dm.id ? typing.name : null}
               runStatus={null}
               onReload={load}
+              onOptimistic={pushOptimistic}
             />
           )}
           {tab === 'chat' && !group && !dm && (

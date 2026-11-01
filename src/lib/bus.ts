@@ -2,7 +2,19 @@ import type { StreamEvent } from './types';
 
 type Listener = (e: StreamEvent) => void;
 
-const listeners = new Set<Listener>();
+/**
+ * 全局单例容器。
+ * 两个原因必须挂 globalThis：
+ * 1. Next dev 下模块会被热重载，运行状态会丢；
+ * 2. 更关键的 —— App Router 里每个 route handler 是各自编译的，
+ *    模块级的 Set 在不同路由之间不是同一个实例。
+ *    结果就是 /api/human 里 emit 的消息，/api/stream 收不到。
+ */
+const g = globalThis as unknown as { __aiOffice?: Record<string, unknown> };
+export const store: Record<string, unknown> = (g.__aiOffice ??= {});
+
+const listeners: Set<Listener> = (store.__listeners as Set<Listener>) ?? new Set<Listener>();
+store.__listeners = listeners;
 
 export function subscribe(fn: Listener): () => void {
   listeners.add(fn);
@@ -18,10 +30,3 @@ export function emit(e: StreamEvent): void {
     }
   }
 }
-
-/**
- * 全局单例容器：Next.js dev 下模块会被热重载，用 globalThis 兜住，
- * 避免心跳调度器和运行状态在热更新后丢失。
- */
-const g = globalThis as unknown as { __aiOffice?: Record<string, unknown> };
-export const store: Record<string, unknown> = (g.__aiOffice ??= {});

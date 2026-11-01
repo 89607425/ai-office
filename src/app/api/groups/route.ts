@@ -1,13 +1,24 @@
 import { NextResponse } from 'next/server';
-import { createGroup, getGroups, getMembers } from '@/lib/kernel';
+import { createGroup, deleteGroup, getGroups, getMembers, publicAgents } from '@/lib/kernel';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function GET() {
   return NextResponse.json({
-    groups: getGroups().map((g) => ({ ...g, members: getMembers(g.id) })),
+    groups: getGroups().map((g) => ({ ...g, members: publicAgents(getMembers(g.id)) })),
   });
+}
+
+export async function DELETE(req: Request) {
+  const id = new URL(req.url).searchParams.get('id');
+  if (!id) return NextResponse.json({ error: '缺少 id' }, { status: 400 });
+  try {
+    deleteGroup(id);
+    return NextResponse.json({ ok: true });
+  } catch (e) {
+    return NextResponse.json({ error: String(e) }, { status: 400 });
+  }
 }
 
 export async function POST(req: Request) {

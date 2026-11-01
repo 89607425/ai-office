@@ -3,7 +3,7 @@ export type ChatMsg = { role: 'system' | 'user' | 'assistant'; content: string }
 export type LLMMode = 'live' | 'demo';
 
 export type LLMCall = {
-  tag: 'leader' | 'agent' | 'moment' | 'comment' | 'appeal';
+  tag: 'leader' | 'agent' | 'moment' | 'comment' | 'appeal' | 'summary' | 'directive';
   messages: ChatMsg[];
   temperature?: number;
   maxTokens?: number;
@@ -16,13 +16,17 @@ const PROVIDERS: Record<string, { baseURL: string; model: string }> = {
   deepseek: { baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
   moonshot: { baseURL: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k' },
   qwen: { baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
+  siliconflow: { baseURL: 'https://api.siliconflow.cn/v1', model: 'zai-org/GLM-5.3-Flash' },
 };
 
 /**
  * 每个员工可以有自己的厂商和 key。
  * 解析优先级：员工档案 > .env.local 全局兜底 > 演示模式。
  */
-export type Binding = { provider?: string; apiKey?: string; model?: string } | null | undefined;
+export type Binding =
+  | { provider?: string; apiKey?: string; model?: string; baseUrl?: string }
+  | null
+  | undefined;
 
 export type Resolved = {
   mode: LLMMode;
@@ -39,8 +43,8 @@ export function resolve(b: Binding): Resolved {
   const key = (b?.apiKey || process.env.LLM_API_KEY || '').trim();
   const model = (b?.model || process.env.LLM_MODEL || preset?.model || 'deepseek-chat').trim();
   const baseURL =
+    (b?.baseUrl || '').trim() ||
     (provider === 'custom' ? process.env.LLM_BASE_URL : undefined) ||
-    (b?.provider && !preset ? process.env.LLM_BASE_URL : undefined) ||
     preset?.baseURL ||
     PROVIDERS.deepseek.baseURL;
 
@@ -82,24 +86,39 @@ export async function chat(call: LLMCall, binding?: Binding): Promise<string> {
   if (call.json && r.provider !== 'qwen') body.response_format = { type: 'json_object' };
 
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 60000);
-  try {
+  const timer = setTimeout(() => ctrl.abort(), 120000);
+
+  const call1 = async (payload: Record<string, unknown>): Promise<string> => {
     const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${r.key}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(payload),
       signal: ctrl.signal,
     });
     if (!res.ok) {
       const t = await res.text().catch(() => '');
       throw new Error(`LLM ${res.status}: ${t.slice(0, 300)}`);
     }
-    const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-    const content = json.choices?.[0]?.message?.content ?? '';
-    return content.trim();
+    const json = (await res.json()) as {
+      choices?: { message?: { content?: string; reasoning_content?: string } }[];
+    };
+    const msg = json.choices?.[0]?.message ?? {};
+    const content = (msg.content ?? '').trim();
+    if (!content && msg.reasoning_content) return ''; // 推理模型把预算全花在思考上了
+    return content;
+  };
+
+  try {
+    let out = await call1(body);
+    if (!out) {
+      // 推理模型（deepseek-v4-pro 这类）会把 token 全烧在 reasoning 上，
+      // content 直接为空。加大预算再要一次，否则组长永远吐不出 JSON。
+      out = await call1({ ...body, max_tokens: Math.min(8000, (call.maxTokens ?? 700) * 4) });
+    }
+    return out;
   } finally {
     clearTimeout(timer);
   }
@@ -127,7 +146,17 @@ function demoEngine(call: LLMCall): string {
   if (call.tag === 'moment') return demoMoment(ctx);
   if (call.tag === 'comment') return demoComment(ctx);
   if (call.tag === 'appeal') return demoAppeal(ctx);
+  if (call.tag === 'summary') return demoSummary(ctx);
+  if (call.tag === 'directive') return demoDirective(ctx);
   return demoAgent(ctx, call.messages);
+}
+
+function demoSummary(ctx: string): string {
+  const h = /员工「(.+?)」（(.+?)）/.exec(ctx);
+  const name = h?.[1] ?? '这位员工';
+  const role = h?.[2] ?? '';
+  const bullets = ctx.split('\n').filter((l) => l.startsWith('- ')).length;
+  return `${name}（${role}）最近在这个群里比较活跃，共留下 ${bullets} 条发言。它的意见基本围绕自己负责的部分展开，遇到不合理的排期会当场顶回去，但没有留下成体系的书面产出。交接时需要注意：它的判断多为口头表达，缺少沉淀。`;
 }
 
 function demoLeader(ctx: string, round: number): string {
@@ -310,7 +339,20 @@ function demoComment(ctx: string): string {
   return pick(COMMENTS);
 }
 
+/** 演示模式下也做一次粗糙的调岗解析，保证功能可见 */
+function demoDirective(ctx: string): string {
+  const role = /(?:去当|去做|改成|改为|换成|接手|负责)([^，。、\n]{2,12})/.exec(ctx)?.[1]?.trim();
+  const who = /员工「(.+?)」/.exec(ctx)?.[1] ?? '这位员工';
+  if (!role) return JSON.stringify({ role: '', prompt: '' });
+  return JSON.stringify({
+    role: role.slice(0, 10),
+    prompt: `你是${who}，现在负责${role}。保留你原本的性格和说话方式，但工作重心按老板最新交代的执行。`,
+  });
+}
+
 function demoAppeal(ctx: string): string {
+  // 演示模式也要保留"自主判断"的形态：它可以忍着不说
+  if (Math.random() < 0.45) return 'NO';
   const lines = [
     '老板，我说句实话：组长这个分派我不太认同。我手上的活还没收尾，又给我压新的，两头都做不好。',
     '越级汇报一下：组长让我改的那个东西，上一版就是按他的要求改的，现在又要改回去。我不理解。',
