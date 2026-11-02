@@ -46,22 +46,85 @@ function resolveSafe(group_id: string, rel: string): string | null {
 const MAX_READ = 16000;
 const MAX_WRITE = 60000;
 
-export function readFile(group_id: string, rel: string): ToolResult {
+export function readFile(group_id: string, rel: string, start?: number, end?: number): ToolResult {
   const abs = resolveSafe(group_id, rel);
   if (!abs) return { ok: false, output: '拒绝：路径越界（只允许访问 workspace 目录内）' };
   if (!fs.existsSync(abs)) return { ok: false, output: `文件不存在：${rel}` };
-  let content = fs.readFileSync(abs, 'utf8');
-  if (content.length > MAX_READ) content = content.slice(0, MAX_READ) + `\n…（已截断，共 ${content.length} 字符）`;
+  const raw = fs.readFileSync(abs, 'utf8');
+  const total = raw.length;
+  const hasRange = typeof start === 'number' || typeof end === 'number';
+  if (hasRange) {
+    const lines = raw.split('\n');
+    const s = Math.max(1, start ?? 1);
+    const e = Math.min(lines.length, end ?? lines.length);
+    const slice = lines.slice(s - 1, e).join('\n');
+    return { ok: true, output: `（${rel} 共 ${lines.length} 行，以下为第 ${s}-${e} 行）\n${slice}` };
+  }
+  let content = raw;
+  if (content.length > MAX_READ)
+    content = content.slice(0, MAX_READ) + `\n…（已截断，共 ${total} 字符，可用 read_file 的 start/end 读指定行范围）`;
   return { ok: true, output: content };
 }
 
-export function writeFile(group_id: string, rel: string, content: string): ToolResult {
+export function writeFile(group_id: string, rel: string, content: string, append = false): ToolResult {
   const abs = resolveSafe(group_id, rel);
   if (!abs) return { ok: false, output: '拒绝：路径越界（只允许访问 workspace 目录内）' };
-  if (content.length > MAX_WRITE) return { ok: false, output: '拒绝：写入内容超过 20000 字符' };
+  if (content.length > MAX_WRITE)
+    return { ok: false, output: `拒绝：单次写入内容超过 ${MAX_WRITE} 字符，请改用 append:true 分多段追加写` };
   fs.mkdirSync(path.dirname(abs), { recursive: true });
-  fs.writeFileSync(abs, content, 'utf8');
-  return { ok: true, output: `已写入 ${rel}（${content.length} 字符）` };
+  if (append && fs.existsSync(abs)) {
+    fs.appendFileSync(abs, content, 'utf8');
+  } else {
+    fs.writeFileSync(abs, content, 'utf8');
+  }
+  return { ok: true, output: `${append ? '已追加' : '已写入'} ${rel}（${content.length} 字符）` };
+}
+
+/**
+ * 跨文件搜索：在工作区所有源码/文档里按关键词（不区分大小写）查找，
+ * 返回 文件:行号:内容。用于多模块项目里追踪定义/引用，远比整篇读文件省 token。
+ */
+export function searchFiles(group_id: string, query: string, max = 60): ToolResult {
+  const root = rootFor(group_id);
+  if (!query || !query.trim()) return { ok: false, output: '缺少搜索关键词' };
+  const q = query.toLowerCase();
+  const out: string[] = [];
+  let filesScanned = 0;
+  const walk = (dir: string): void => {
+    if (out.length >= max) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (out.length >= max) return;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (!e.name.startsWith('.')) walk(full);
+      } else if (/\.(md|txt|json|js|ts|tsx|jsx|py|html|css|yml|yaml|csv|go|rs|java|rb|sh|sql|xml|vue)$/i.test(e.name)) {
+        filesScanned++;
+        try {
+          const lines = fs.readFileSync(full, 'utf8').split('\n');
+          for (let i = 0; i < lines.length && out.length < max; i++) {
+            if (lines[i].toLowerCase().includes(q)) {
+              const rel = path.relative(root, full);
+              out.push(`${rel}:${i + 1}: ${lines[i].trim().slice(0, 200)}`);
+            }
+          }
+        } catch {
+          /* 跳过不可读文件 */
+        }
+      }
+    }
+  };
+  walk(root);
+  if (!out.length) return { ok: true, output: `未找到匹配「${query}」的内容（已扫描 ${filesScanned} 个文件）` };
+  return {
+    ok: true,
+    output: `匹配「${query}」共 ${out.length} 条（已扫描 ${filesScanned} 个文件）：\n` + out.join('\n'),
+  };
 }
 
 export function listFiles(group_id: string): ToolResult {
@@ -120,7 +183,7 @@ export function latestFile(group_id: string): string | null {
 
 /** agent 输出里最后一个 ```json 代码块会被当作工具调用 */
 export type ToolCall = {
-  tool: 'read_file' | 'write_file' | 'list_files' | 'post_group';
+  tool: 'read_file' | 'write_file' | 'list_files' | 'post_group' | 'post_dm' | 'search_files';
   args: Record<string, string>;
 };
 
@@ -145,7 +208,7 @@ export function parseToolCall(text: string): ToolCall | null {
   try {
     const obj = JSON.parse(raw) as ToolCall;
     if (!obj || typeof obj.tool !== 'string') return null;
-    if (!['read_file', 'write_file', 'list_files', 'post_group'].includes(obj.tool)) return null;
+    if (!['read_file', 'write_file', 'list_files', 'post_group', 'post_dm', 'search_files'].includes(obj.tool)) return null;
     return obj;
   } catch {
     return null;
@@ -161,16 +224,31 @@ export function stripToolBlocks(text: string): string {
 }
 
 export function runTool(group_id: string, call: ToolCall): ToolResult {
+  const a = call.args;
   switch (call.tool) {
-    case 'read_file':
-      return readFile(group_id, call.args.path || '');
-    case 'write_file':
-      return writeFile(group_id, call.args.path || 'untitled.md', call.args.content || '');
+    case 'read_file': {
+      const start = a.start ? parseInt(a.start, 10) : undefined;
+      const end = a.end ? parseInt(a.end, 10) : undefined;
+      return readFile(
+        group_id,
+        a.path || '',
+        Number.isFinite(start) ? start : undefined,
+        Number.isFinite(end) ? end : undefined
+      );
+    }
+    case 'write_file': {
+      const append = /^(true|1|yes)$/i.test(a.append || '');
+      return writeFile(group_id, a.path || 'untitled.md', a.content || '', append);
+    }
     case 'list_files':
       return listFiles(group_id);
-    // post_group 由调度内核在群内真实发送；这里只给一个软成功，避免被当成未知工具丢弃
+    case 'search_files':
+      return searchFiles(group_id, a.query || '');
+    // post_group / post_dm 由调度内核真实发送；这里只给软成功，避免被当未知工具丢弃
     case 'post_group':
       return { ok: true, output: '（已在群内发布，由调度内核发送）' };
+    case 'post_dm':
+      return { ok: true, output: '（已发给老板，由调度内核送达）' };
     default:
       return { ok: false, output: '未知工具' };
   }

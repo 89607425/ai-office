@@ -82,6 +82,21 @@ export function postToGroup(agent: Agent, groupId: string, content: string, runI
   });
 }
 
+/** agent 主动给老板发私信：写入老板↔该员工的私聊线程，老板打开该员工 DM 即可看到 */
+export function postToBoss(agent: Agent, content: string): void {
+  const c = (content || '').trim();
+  if (!c) return;
+  postMessage({
+    group_id: dmId(agent.id),
+    run_id: null,
+    sender_id: agent.id,
+    sender_name: agent.name,
+    content: c.slice(0, 4000),
+    kind: 'chat',
+    meta: JSON.stringify({ via: 'post_dm' }),
+  });
+}
+
 /** 选一个该员工最该同步结果的群：优先它最近发过言的那个群 */
 function pickTargetGroup(agentId: string): string | null {
   const mine = db()
@@ -402,31 +417,13 @@ export function groupFacts(groupId: string): { roster: string; recent: string } 
   return { roster, recent };
 }
 
-/**
- * 兜底落盘：模型经常嘴上说"我写好了"，但根本没输出工具调用块。
- * 只要它在回复里点明了一个文件名，就把这条回复落成那个文件 —— 至少产出是真的。
- * 注意：这是展示层之外的"补救"，不是假装它调用了工具，群里会明说是系统存的。
- */
-export function saveMentionedFile(groupId: string, agentName: string, text: string): string | null {
-  if (!text) return null;
-  const m = /([\w\u4e00-\u9fa5-]+\.(?:md|txt|json|js|ts|py|html|css|yml|yaml|csv))/i.exec(text);
-  if (!m) return null;
-  const name = m[1].replace(/^[\\/]+/, '');
-  const res = writeFile(groupId, name, `${text}\n\n— ${agentName}`);
-  if (!res.ok) return null;
-  postMessage({
-    group_id: groupId,
-    run_id: null,
-    sender_id: 'system',
-    sender_name: '系统',
-    content: `已把 ${agentName} 的回复存成文件：${name}（${res.output}）`,
-    kind: 'system',
-  });
-  return name;
-}
-
 /** 老板在群里 @ 了某个人 —— 那个人必须当场回话，不能装没看见 */
-export async function replyInGroup(groupId: string, agentId: string, question: string): Promise<void> {
+export async function replyInGroup(
+  groupId: string,
+  agentId: string,
+  question: string,
+  runId: string | null = null
+): Promise<void> {
   const g = getGroup(groupId);
   const agent = getAgent(agentId);
   if (!g || !agent) return;
@@ -470,11 +467,13 @@ ${privateMem.length ? `\n你自己的记忆：\n${privateMem.map((m) => `- ${m}`
     let text = await chat({ tag: 'agent', messages, temperature: 0.9, maxTokens: 8000, audit: { groupId, agentId: agent.id, agentName: agent.name } }, bindingOf(agent));
 
     // 和群聊主循环一样，@ 点名也必须真的能干活 —— 这里要有工具循环
-    let wrote = false;
     if (agent.tools_enabled) {
       const call = parseToolCall(text);
       if (call && call.tool === 'post_group') {
         // 群内发言本就会落在群里，不需要再重复发布
+        text = stripToolBlocks(text);
+      } else if (call && call.tool === 'post_dm') {
+        postToBoss(agent, call.args.content || stripToolBlocks(text));
         text = stripToolBlocks(text);
       } else if (call) {
         const res = runTool(groupId, call);
@@ -487,7 +486,6 @@ ${privateMem.length ? `\n你自己的记忆：\n${privateMem.map((m) => `- ${m}`
           content: `[工具] ${call.tool} ${call.args.path || ''} → ${res.output.slice(0, 200)}`,
           kind: res.ok ? 'tool_result' : 'tool',
         });
-        if (res.ok && call.tool === 'write_file') wrote = true;
         const follow = await chat(
           {
             tag: 'agent',
@@ -509,13 +507,12 @@ ${privateMem.length ? `\n你自己的记忆：\n${privateMem.map((m) => `- ${m}`
     const finalText = stripToolBlocks(text);
     postMessage({
       group_id: groupId,
-      run_id: null,
+      run_id: runId,
       sender_id: agent.id,
       sender_name: agent.name,
       content: finalText || '……',
       kind: 'chat',
     });
-    if (!wrote) saveMentionedFile(groupId, agent.name, finalText);
   } catch (e) {
     // 调不通就如实说，不要静默失败 —— 那种"群里没人理你"最难排查
     postMessage({
@@ -912,6 +909,8 @@ ${humanNotes.length ? `\n老板（人类管理员）的插话：\n${humanNotes.j
 - 把任务**在群里 @ 对应成员说清楚**是你的主要推进手段，像真实组长那样面对面分工，不要只靠文档。看板/文件清单里已有成员写好的产出时，要么指定某人去审查/对接它，要么就收敛；不要假装没看见、每次都从零开始。
 - 讨论里若有人提出了需要拍板的问题（尤其 @ 了你或 @ 了同事），先处理那个问题（dispatch 让它被解决，或你自己 ask_human），不要无视。
 - 不要为了"留档"强迫成员写没必要的文件：只有任务确实要交付文档/代码/清单时才让它写文件；纯沟通对齐在群里说清即可。
+- 多文件 / 多模块的编码任务：在分派里要求负责人先写 project_index.md（项目地图：文件→职责→关键导出/接口→依赖谁/被谁依赖），用 search_files 跨文件追踪引用、用 read_file 的 start/end 只读相关行验证交叉引用，大文件用 write_file 的 append 分段写；避免让成员整篇重读文件或在群里贴大段代码。
+- 除非任务特别需要，不要把常规工作分派给成本高的大模型成员（如 GPT 类），优先用便宜成员做主力，贵模型只留给真正需要它的环节。
 - 只有当关键分派都已有对应产出或成员确认完成时，才用 converge；否则继续分派下一步，最多分派 ${Math.min(3, members.length)} 个成员。`,
     },
   ];
@@ -926,6 +925,157 @@ ${humanNotes.length ? `\n老板（人类管理员）的插话：\n${humanNotes.j
     raw = `调用失败：${String(e)}`;
   }
   return { out: parseLeaderOut(raw), raw };
+}
+
+/**
+ * 收工前校验：组长声称"完成"的交付物，文件系统里到底有没有真实落盘。
+ * 专为灭掉"嘴上说写完、磁盘空空"的幻觉——只核对文件清单，不轻信口头汇报。
+ */
+async function verifyConvergence(
+  group: Group,
+  run: { id: string; goal: string; round: number },
+  conv: { summary: string; acceptance: string[] }
+): Promise<{ allDone: boolean; missing: string[]; reassign: { to: string; instruction: string }[] }> {
+  const leader = getAgent(group.leader_id);
+  if (!leader) return { allDone: true, missing: [], reassign: [] };
+  const files = groupFileList(group.id);
+  const members = getMembers(group.id).filter((a) => a.id !== group.leader_id);
+  const ids = members.map((a) => `${a.id}(${a.name}·${a.role})`).join('、');
+
+  let raw = '';
+  try {
+    raw = await chat(
+      {
+        tag: 'leader',
+        messages: [
+          { role: 'system' as const, content: leader.system_prompt },
+          {
+            role: 'user' as const,
+            content: `你在收工前必须做一次"交付物实存校验"。不要相信口头汇报，只信文件清单。
+任务目标：${run.goal}
+你刚才的收工结论：${conv.summary}
+你列的验收项：
+${conv.acceptance.map((a, i) => `${i + 1}. ${a}`).join('\n')}
+当前工作区真实存在的文件（只看这个）：
+${files}
+可选成员：${ids}
+
+只输出 JSON：
+{"allDone":true,"missing":["声称完成但文件清单里找不到的文件名或产物"],"reassign":[{"to":"负责补做的成员id","instruction":"让他补什么、产出哪个文件"}]}
+判定规则：
+- 验收项里提到的文件/产物，凡是文件清单里没有真实存在的，都算 missing。
+- 若所有验收项对应的文件都已存在，allDone=true、missing=[]、reassign=[]。
+- missing 非空时，按文件归属把补做任务分派给合适的成员（to 必须是可选成员之一）。
+- 只核对"文件是否真实落盘"，不要因为"内容不够好"就判 missing。`,
+          },
+        ],
+        temperature: 0.3,
+        json: true,
+        maxTokens: 1500,
+        audit: { runId: run.id, groupId: group.id, agentId: leader.id, agentName: leader.name },
+      },
+      bindingOf(leader)
+    );
+  } catch (e) {
+    raw = `调用失败：${String(e)}`;
+  }
+
+  const o = parseJsonObj(raw) as { allDone?: boolean; missing?: unknown; reassign?: unknown } | null;
+  if (!o || typeof o.allDone !== 'boolean') {
+    // 解析失败：宁可打回，不让"假完成"溜过去
+    return { allDone: false, missing: conv.acceptance.slice(), reassign: [] };
+  }
+  const missing = Array.isArray(o.missing) ? o.missing.map(String).filter(Boolean) : [];
+  const reassign = Array.isArray(o.reassign)
+    ? (o.reassign as any[])
+        .filter((r) => r && typeof r.to === 'string' && typeof r.instruction === 'string')
+        .map((r) => ({ to: r.to, instruction: r.instruction }))
+        .filter((r) => members.some((m) => m.id === r.to))
+    : [];
+  // 即便模型声称 allDone，只要 missing 非空就强制判不通过（双保险）
+  return { allDone: o.allDone === true && missing.length === 0, missing, reassign };
+}
+
+/** 把一组分派真正跑完：同步群+看板 → 逐人 agentTurn → 收集越级。供正常分派与"校验打回补做"共用 */
+async function executeDispatch(
+  group: Group,
+  run: { id: string; goal: string; round: number },
+  items: { to: string; instruction: string }[],
+  digest: string[],
+  spoken: Set<string>,
+  members: Agent[],
+  instructionLog: Record<string, string[]>
+): Promise<void> {
+  // 强制反对者：第 2 轮起，若反对者还没说过话，插进去
+  if (run.round >= 2 && !spoken.has(group.critic_id) && !items.some((i) => i.to === group.critic_id)) {
+    items.push({
+      to: group.critic_id,
+      instruction: '针对上面的方案挑刺：列出至少 3 个风险或边界情况，按 1/2/3 列。',
+    });
+  }
+
+  // 组长把这一轮分派同步到群聊 + 任务看板
+  const leaderName = getAgent(group.leader_id)?.name ?? '组长';
+  const dispatchLines = items.map((it) => `· ${getAgent(it.to)?.name ?? it.to}：${it.instruction}`).join('\n');
+  postMessage({
+    group_id: group.id,
+    run_id: run.id,
+    sender_id: group.leader_id,
+    sender_name: leaderName,
+    content: `【第 ${run.round} 轮分派】\n${dispatchLines}\n（分工以群里 @ 你的内容为准，需要回看时可打开工作区 ${BOARD_FILE}）`,
+    kind: 'chat',
+  });
+  writeBoard(
+    group.id,
+    run.goal,
+    run.round,
+    items.map((it) => ({ name: getAgent(it.to)?.name ?? it.to, instruction: it.instruction })),
+    '进行中'
+  );
+
+  // 给成员喂入当前看板与文件清单，确保它们基于团队进度接着干
+  const wsContext = [
+    `任务看板（工作区 ${BOARD_FILE}）：`,
+    readBoard(group.id) || '（无）',
+    '工作区已有文件：',
+    groupFileList(group.id),
+  ].join('\n');
+
+  for (const item of items.slice(0, 4)) {
+    if (!runIsActive(run.id)) return;
+    const agent = getAgent(item.to);
+    if (!agent) continue;
+    const p = parsePersona(agent.persona);
+    const [lo, hi] = p.latency;
+    const delay = lo + Math.random() * Math.max(0, hi - lo);
+
+    await typing(group.id, agent, delay);
+    const turn = await agentTurn(group, run, agent, item.instruction, [wsContext, ...digest.slice(-6)]);
+    const text = turn.text;
+
+    postMessage({
+      group_id: group.id,
+      run_id: run.id,
+      sender_id: agent.id,
+      sender_name: agent.name,
+      content: text,
+      kind: 'chat',
+    });
+    digest.push(`${agent.name}：${text}`);
+    spoken.add(agent.id);
+
+    const log4 = (instructionLog[agent.id] ??= []);
+    log4.push(item.instruction);
+
+    void maybeAppeal(
+      group,
+      run,
+      agent,
+      item.instruction,
+      text,
+      collectGrievances(item.instruction, run.round, log4)
+    );
+  }
 }
 
 /* ----------------------------- 成员 ----------------------------- */
@@ -944,16 +1094,26 @@ async function agentTurn(
     agent.system_prompt,
     `你的说话风格：${p.tone}。口头禅：${p.catchphrase}。小习惯：${p.quirks.join('；') || '无'}。`,
     `严格要求：用中文口语回复，像在微信群里说话，不要自称 AI，不要用 Markdown 标题。一般性讨论 1-3 句即可；但如果你的任务是要产出文件/文档/代码，正文请写进 write_file 的内容里（可以写很长、很完整），群里只回一句"已写出 XXX"。`,
+    `重要：你写在群里的任何话都只是对话，不会、也绝不会被自动存成文件。要交付文件必须显式调用 write_file 工具；不要指望聊天内容被系统落盘，也不要在群里贴大段文件内容（大段内容请直接 write_file 交给工作区）。`,
     `协作纪律：主要靠群聊推进，组长在群里 @ 你时会把任务说清楚，照着干即可；任务看板只是进度速览，有必要时才去读。需要和其他人配合时，直接在群里 @ 对方沟通，像真实团队一样。`,
     `遇到缺信息、和别人方案冲突、或需要有人拍板的事，直接在群里说出来并 @ 负责人（组长或负责那块的同事），把问题摆到台面上等裁断，不要闷头猜、也不要自己擅自拍板。`,
     agent.tools_enabled
-      ? `如果你需要读写文件，回复的最后附一个代码块：\n\`\`\`json\n{"tool":"write_file","args":{"path":"notes.md","content":"内容"}}\n\`\`\`\n可选工具：read_file(path) / write_file(path,content) / list_files()。不要用它做无关的事。如果你产出了文件，结尾说清楚你交了什么、建议谁接着看。`
+      ? `你的工具（需要时附在回复最后的代码块里，JSON 格式）：
+- read_file(path [, start, end])：读文件；跨文件验证时优先用 start/end 只读相关行，不要整篇重读。
+- write_file(path, content [, append])：写文件；交付代码/文档时必须调用它，不要只在聊天里贴正文。大文件用 append:true 分多次追加写完，单次别超 6 万字符。示例：
+  \`\`\`json
+  {"tool":"write_file","args":{"path":"store.js","content":"这里放文件的完整内容，可以很长很完整"}}
+  \`\`\`
+- list_files()：列目录。
+- search_files(query)：在工作区所有文件里搜关键词，返回 文件:行号:内容，用来跨文件追踪引用/定义，比整篇读快得多。
+- post_dm(content)：主动给老板发私信请示或汇报（如需要老板拍板的关键决策、你发现的风险、组长判断可能出错的证据）。
+涉及多文件/多模块的项目：先写一份 project_index.md 当"项目地图"，列出每个文件→职责→关键导出/接口→依赖谁/被谁依赖；按依赖顺序逐个写文件；改动后用 search_files + 只读相关行的 read_file 验证交叉引用，不要在群里贴大段代码。如果你产出了文件，结尾说清楚你交了什么、建议谁接着看。`
       : '',
   ]
     .filter(Boolean)
     .join('\n');
 
-  const messages = [
+  const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
     { role: 'system' as const, content: sys },
     {
       role: 'user' as const,
@@ -988,17 +1148,59 @@ ${privateMem.length ? `你自己的记忆：\n${privateMem.map((m) => `- ${m}`).
     );
   }
 
-  // 一次 ReAct：解析工具调用 → 执行 → 把结果喂回去再要一次最终回复
+  // 多步 ReAct：循环执行模型抛出的工具块，直到模型不再抛工具块，或触底兜底上限
   if (agent.tools_enabled) {
-    const call = parseToolCall(text);
-    if (call && call.tool === 'post_group') {
-      // 群内发言本就会落在群里，不需要再重复发布
-      text = stripToolBlocks(text);
-    }         else if (call) {
-          const res = runTool(group.id, call);
-          if (res.ok && call.tool === 'write_file') wroteFile = true;
-          if (!res.ok && /越界/.test(res.output)) logSandboxBlock(group.id, `${agent.name}: ${res.output}`);
-      const toolMsg = postMessage({
+    const MAX_TOOL_STEPS = 12; // 单轮最多 12 次工具调用，硬上限防死循环
+    let steps = 0;
+    let lastCallKey = '';
+    while (steps < MAX_TOOL_STEPS) {
+      const call = parseToolCall(text);
+      if (!call) break; // 模型不再抛工具块，结束循环，text 即为最终回复
+
+      if (call.tool === 'post_group') {
+        // 群内发言本就会落在群里，无需重复发布；让模型继续说一句正式的话
+        text = stripToolBlocks(text);
+        messages.push(
+          { role: 'assistant' as const, content: text },
+          { role: 'user' as const, content: '（已在群内发布）继续。' }
+        );
+        text = await chat(
+          { tag: 'agent', messages, temperature: 0.9, maxTokens: 8000, audit: { runId: run.id, groupId: group.id, agentId: agent.id, agentName: agent.name } },
+          bind
+        );
+        steps++;
+        continue;
+      }
+      if (call.tool === 'post_dm') {
+        // 主动给老板发私信，由内核真正送达
+        postToBoss(agent, call.args.content || stripToolBlocks(text));
+        text = stripToolBlocks(text);
+        messages.push(
+          { role: 'assistant' as const, content: text },
+          { role: 'user' as const, content: '（已私信老板）继续。' }
+        );
+        text = await chat(
+          { tag: 'agent', messages, temperature: 0.9, maxTokens: 8000, audit: { runId: run.id, groupId: group.id, agentId: agent.id, agentName: agent.name } },
+          bind
+        );
+        steps++;
+        continue;
+      }
+
+      // 连续相同的非写文件工具调用 = 卡死，直接退出循环，避免反复无效调用
+      const callKey = `${call.tool}|${call.args.path || ''}|${(call.args.content || call.args.query || '').slice(0, 60)}`;
+      if (callKey === lastCallKey && call.tool !== 'write_file') {
+        log(`${agent.name} 重复工具调用（${call.tool} ${call.args.path || ''}），退出 ReAct 循环`);
+        break;
+      }
+      lastCallKey = callKey;
+
+      // 真实工具：read/write/list/search，由内核真正执行并落盘
+      const res = runTool(group.id, call);
+      if (res.ok && call.tool === 'write_file') wroteFile = true;
+      if (!res.ok && /越界/.test(res.output)) logSandboxBlock(group.id, `${agent.name}: ${res.output}`);
+
+      postMessage({
         group_id: group.id,
         run_id: run.id,
         sender_id: agent.id,
@@ -1006,24 +1208,25 @@ ${privateMem.length ? `你自己的记忆：\n${privateMem.map((m) => `- ${m}`).
         content: `[工具] ${call.tool} ${call.args.path || ''} → ${res.output.slice(0, 300)}`,
         kind: res.ok ? 'tool_result' : 'tool',
       });
-      void toolMsg;
-      const follow = await chat(
+
+      // 把工具调用与结果喂回对话，让模型基于结果继续（多步推理 / 跨文件追踪 / 追加写完）
+      messages.push(
+        { role: 'assistant' as const, content: text },
         {
-          tag: 'agent',
-          messages: [
-            ...messages,
-            { role: 'assistant' as const, content: text },
-            { role: 'user' as const, content: `工具执行结果：${res.output}\n现在用一句口语把结果说给群里听，不要再输出代码块。` },
-          ],
-          temperature: 0.9,
-          audit: { runId: run.id, groupId: group.id, agentId: agent.id, agentName: agent.name },
-        },
+          role: 'user' as const,
+          content: `工具执行结果：${res.output}\n需要的话继续调用工具（如 read_file 回读验证、write_file 继续/追加写、search_files 追踪引用）；全部做完，再用一句口语总结你交了什么、建议谁接着看，不要输出代码块。`,
+        }
+      );
+      text = await chat(
+        { tag: 'agent', messages, temperature: 0.9, maxTokens: 8000, audit: { runId: run.id, groupId: group.id, agentId: agent.id, agentName: agent.name } },
         bind
       );
-      // 兜底：不管后续回复有没有内容，工具代码块都不能漏到群里
-      const cleaned = stripToolBlocks(follow);
-      text = cleaned || stripToolBlocks(text) || '文件已经写好。';
+      steps++;
     }
+
+    // 兜底清理：无论是否触底上限，工具 JSON 都不能漏到群里
+    text = stripToolBlocks(text);
+    if (!text) text = '我已经处理完了。';
   }
 
   text = stripToolBlocks(text);
@@ -1257,22 +1460,45 @@ async function loop(group: Group, run: { id: string; goal: string; round: number
 
     if (out.action === 'converge') {
       const leader = getAgent(group.leader_id);
+      // 实存校验：组长声称完成的交付物，文件系统里到底有没有真实落盘
+      const verify = await verifyConvergence(group, run, out);
+      if (verify.allDone) {
+        postMessage({
+          group_id: group.id,
+          run_id: run.id,
+          sender_id: group.leader_id,
+          sender_name: leader?.name ?? '组长',
+          content: `收个尾：${out.summary}\n验收项：\n${out.acceptance.map((a, i) => `${i + 1}. ${a}`).join('\n')}`,
+          kind: 'chat',
+        });
+        writeBoard(group.id, run.goal, round, [], '已完成');
+        addMemory(group.leader_id, 'group', `任务「${run.goal}」的结论：${out.summary}`);
+        for (const m of members) {
+          const own = digest.filter((d) => d.startsWith(`${m.name}：`)).slice(-2);
+          if (own.length) addMemory(m.id, 'private', `我在「${run.goal}」里做的事：${own.join(' / ')}`);
+        }
+        setStatus(run.id, 'done', round);
+        return;
+      }
+      // 校验未过：打回补做，转成分派，不收工
       postMessage({
         group_id: group.id,
         run_id: run.id,
         sender_id: group.leader_id,
         sender_name: leader?.name ?? '组长',
-        content: `收个尾：${out.summary}\n验收项：\n${out.acceptance.map((a, i) => `${i + 1}. ${a}`).join('\n')}`,
+        content: `收工前校验没过：以下产物还没真实落盘，已打回补做：${verify.missing.join('、') || '（验收项未全部满足）'}`,
         kind: 'chat',
       });
-      writeBoard(group.id, run.goal, round, [], '已完成');
-      addMemory(group.leader_id, 'group', `任务「${run.goal}」的结论：${out.summary}`);
-      for (const m of members) {
-        const own = digest.filter((d) => d.startsWith(`${m.name}：`)).slice(-2);
-        if (own.length) addMemory(m.id, 'private', `我在「${run.goal}」里做的事：${own.join(' / ')}`);
-      }
-      setStatus(run.id, 'done', round);
-      return;
+      const fallback = members
+        .filter((m) => m.id !== group.leader_id)
+        .slice(0, 2)
+        .map((m) => ({
+          to: m.id,
+          instruction: `补做以下未落盘的产物：${verify.missing.join('、')}。务必用 write_file 真正把文件写到工作区，不要只在群里说"已写完"；写完用 list_files 回读确认已落盘。`,
+        }));
+      const items = verify.reassign.length ? verify.reassign : fallback;
+      await executeDispatch(group, run, items, digest, spoken, members, instructionLog);
+      continue;
     }
 
     // dispatch
@@ -1284,81 +1510,7 @@ async function loop(group: Group, run: { id: string; goal: string; round: number
         .slice(0, 2)
         .map((m) => ({ to: m.id, instruction: `推进「${run.goal}」，说出你这一步要做的事。` }));
     }
-
-    // 强制反对者：第 2 轮起，若反对者还没说过话，插进去
-    if (round >= 2 && !spoken.has(group.critic_id) && !items.some((i) => i.to === group.critic_id)) {
-      items.push({
-        to: group.critic_id,
-        instruction: '针对上面的方案挑刺：列出至少 3 个风险或边界情况，按 1/2/3 列。',
-      });
-    }
-
-    // 组长把这一轮分派同步到群聊 + 任务看板，让所有人知道谁该干什么
-    const leaderName = getAgent(group.leader_id)?.name ?? '组长';
-    const dispatchLines = items
-      .map((it) => `· ${getAgent(it.to)?.name ?? it.to}：${it.instruction}`)
-      .join('\n');
-    postMessage({
-      group_id: group.id,
-      run_id: run.id,
-      sender_id: group.leader_id,
-      sender_name: leaderName,
-      content: `【第 ${round} 轮分派】\n${dispatchLines}\n（分工以群里 @ 你的内容为准，需要回看时可打开工作区 ${BOARD_FILE}）`,
-      kind: 'chat',
-    });
-    writeBoard(
-      group.id,
-      run.goal,
-      round,
-      items.map((it) => ({ name: getAgent(it.to)?.name ?? it.to, instruction: it.instruction })),
-      '进行中'
-    );
-
-    // 给成员喂入当前看板与文件清单，确保它们基于团队进度接着干
-    const wsContext = [
-      `任务看板（工作区 ${BOARD_FILE}）：`,
-      readBoard(group.id) || '（无）',
-      '工作区已有文件：',
-      groupFileList(group.id),
-    ].join('\n');
-
-    for (const item of items.slice(0, 4)) {
-      if (!runIsActive(run.id)) return;
-      const agent = getAgent(item.to);
-      if (!agent) continue;
-      const p = parsePersona(agent.persona);
-      const [lo, hi] = p.latency;
-      const delay = lo + Math.random() * Math.max(0, hi - lo);
-
-      await typing(group.id, agent, delay);
-      const turn = await agentTurn(group, run, agent, item.instruction, [wsContext, ...digest.slice(-6)]);
-      const text = turn.text;
-
-      postMessage({
-        group_id: group.id,
-        run_id: run.id,
-        sender_id: agent.id,
-        sender_name: agent.name,
-        content: text,
-        kind: 'chat',
-      });
-      if (!turn.wroteFile) saveMentionedFile(group.id, agent.name, text);
-      digest.push(`${agent.name}：${text}`);
-      spoken.add(agent.id);
-
-      const log4 = (instructionLog[agent.id] ??= []);
-      log4.push(item.instruction);
-
-      // 它自己决定要不要找老板，不是我们替它决定
-      void maybeAppeal(
-        group,
-        run,
-        agent,
-        item.instruction,
-        text,
-        collectGrievances(item.instruction, round, log4)
-      );
-    }
+    await executeDispatch(group, run, items, digest, spoken, members, instructionLog);
   }
 
   postMessage({

@@ -28,6 +28,7 @@ export default function ChatView({
   const [goal, setGoal] = useState<string>(() => (typeof window !== 'undefined' ? localStorage.getItem('ai-office:defaultGoal') || '' : ''));
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [showWs, setShowWs] = useState(false);
   const [files, setFiles] = useState<{ name: string; size: number }[]>([]);
   const [showLogs, setShowLogs] = useState(false);
@@ -76,11 +77,19 @@ export default function ChatView({
   }
 
   async function stopRun() {
-    await fetch('/api/run', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'stop', runId: messages.find((m) => m.run_id)?.run_id ?? '' }),
-    });
+    const rid = messages.filter((m) => m.run_id).pop()?.run_id;
+    if (!rid) return;
+    setStopping(true);
+    try {
+      await fetch('/api/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop', runId: rid }),
+      });
+    } finally {
+      setStopping(false);
+      onReload();
+    }
   }
 
   async function send() {
@@ -144,6 +153,7 @@ export default function ChatView({
   }
 
   const running = runStatus?.status === 'running';
+  const runActive = !!runStatus && (runStatus.status === 'running' || runStatus.status === 'paused');
   const title = mode === 'group' ? group?.name ?? '' : dm?.agent.name ?? '';
   const subtitle =
     mode === 'group'
@@ -181,12 +191,13 @@ export default function ChatView({
               >
                 下发任务
               </button>
-              {running && (
+              {runActive && (
                 <button
                   onClick={() => void stopRun()}
-                  className="rounded border border-[#D9D9D9] bg-white px-2 py-1 text-[12px] text-[#8A8A8A]"
+                  disabled={stopping}
+                  className="rounded border border-[#D9534F] bg-white px-2 py-1 text-[12px] text-[#D9534F] hover:bg-[#FCEDED] disabled:opacity-50"
                 >
-                  叫停
+                  {stopping ? '正在结束…' : running ? '中止任务' : '结束任务'}
                 </button>
               )}
             </>
