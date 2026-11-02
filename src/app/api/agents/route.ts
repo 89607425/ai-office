@@ -82,6 +82,7 @@ export async function PATCH(req: Request) {
     base_url?: string;
     model?: string;
     api_key?: string;
+    reasoning_effort?: string;
   };
   const id = (body.id || '').trim();
   if (!id) return NextResponse.json({ error: '缺少员工' }, { status: 400 });

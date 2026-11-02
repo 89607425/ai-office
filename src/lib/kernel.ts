@@ -1,7 +1,7 @@
 import { db } from './db';
 import { chat, mode, modelName, provider } from './llm';
 import { emit, store } from './bus';
-import { parseToolCall, runTool, logSandboxBlock, stripToolBlocks, writeFile } from './sandbox';
+import { parseToolCall, runTool, logSandboxBlock, stripToolBlocks, writeFile, readFile, listFiles, latestFile } from './sandbox';
 import { bindingLabel } from './llm';
 import type { Agent, AgentPublic, Group, Message, Persona, Run } from './types';
 
@@ -15,11 +15,105 @@ export function bindingOf(a: Agent | null | undefined) {
     apiKey: a.api_key || undefined,
     model: a.model || undefined,
     baseUrl: a.base_url || undefined,
+    reasoningEffort: a.reasoning_effort || undefined,
   };
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const uid = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+
+/* ----------------------------- 任务看板 / 群内发布 ----------------------------- */
+
+/** 每个群工作区里有一份共享任务看板，所有成员动手前都读它，组长负责维护 */
+export const BOARD_FILE = '任务看板.md';
+
+/** 列出某群工作区的文件清单（把"当前有什么产出"喂给组长和成员） */
+export function groupFileList(groupId: string): string {
+  const res = listFiles(groupId);
+  return res.ok ? res.output : '（工作区为空）';
+}
+
+/** 读取任务看板；没有就返回空串 */
+export function readBoard(groupId: string): string {
+  const res = readFile(groupId, BOARD_FILE);
+  return res.ok ? res.output : '';
+}
+
+/** 组长把分派写进工作区看板，让所有成员都能读到当前进度与待办 */
+export function writeBoard(
+  groupId: string,
+  goal: string,
+  round: number,
+  items: { name: string; instruction: string }[],
+  status: string
+): void {
+  const files = groupFileList(groupId);
+  const lines = items.length
+    ? items.map((it, i) => `${i + 1}. **${it.name}**： ${it.instruction}`).join('\n')
+    : '（本轮暂无新分派）';
+  const md = [
+    `# 任务看板：${goal}`,
+    '',
+    `- 状态：${status}（第 ${round} 轮）`,
+    '- 工作区文件：',
+    ...files
+      .split('\n')
+      .filter(Boolean)
+      .map((f) => `  - ${f}`),
+    '',
+    '## 本轮分派',
+    lines,
+    '',
+    '> 这是组长维护的共享看板。成员动手前先读它，按上面的分派接着干；干完在群里同步进度、把产出落到工作区。',
+  ].join('\n');
+  writeFile(groupId, BOARD_FILE, md);
+}
+
+/** 以某员工身份在群里发一条消息（私聊操作把结果同步回群时使用） */
+export function postToGroup(agent: Agent, groupId: string, content: string, runId: string | null = null): void {
+  if (!content.trim()) return;
+  postMessage({
+    group_id: groupId,
+    run_id: runId,
+    sender_id: agent.id,
+    sender_name: agent.name,
+    content: content.slice(0, 4000),
+    kind: 'chat',
+  });
+}
+
+/** 选一个该员工最该同步结果的群：优先它最近发过言的那个群 */
+function pickTargetGroup(agentId: string): string | null {
+  const mine = db()
+    .prepare('SELECT group_id FROM group_members WHERE agent_id = ?')
+    .all(agentId) as { group_id: string }[];
+  if (!mine.length) return null;
+  let best: string | null = null;
+  let bestT = -1;
+  for (const { group_id } of mine) {
+    const last = db()
+      .prepare('SELECT created_at FROM messages WHERE group_id = ? AND sender_id = ? ORDER BY created_at DESC LIMIT 1')
+      .get(group_id, agentId) as { created_at: number } | undefined;
+    const t = last?.created_at ?? 0;
+    if (t > bestT) {
+      bestT = t;
+      best = group_id;
+    }
+  }
+  return best;
+}
+
+/** 私聊里老板的话是否指向"群/工作区"的实际操作（需要真去改文件/发群） */
+export function isGroupAction(text: string): boolean {
+  return /(群|工作区|文件|文档|方案|\.md|看板|发群里|发到群|贴到群|同步到群|润色|修订|重做|整理|把(刚才|那份|群里|组里|这个|那|文)|更新一下|改一下|写一下|整理一下|改稿|润色一下|补充一下|重做一下)/.test(
+    text
+  );
+}
+
+/** 纯疑问句（没有点名文件时）不应被当成工作区操作，避免误改文件 */
+export function looksLikeQuestion(text: string): boolean {
+  return /[？?]$|[吗呢么]$|怎么|为什么|为何|是否|是不是|还是|啥|哪/.test(text);
+}
 
 /* ----------------------------- 查询 ----------------------------- */
 
@@ -177,6 +271,117 @@ ${privateMem.length ? `\n你自己的记忆：\n${privateMem.map((m) => `- ${m}`
   }
 }
 
+/**
+ * 私聊操作通道：老板在 1-1 里给员工下达「关于群/工作区」的指令时，
+ * 员工会真的去读群聊记录、读任务看板、改工作区文件，并把结果用 post_group 同步回群里。
+ * 纯闲聊不要走这里（dm/route 会先判断意图）。
+ */
+export async function executeDmTask(agentId: string, content: string): Promise<void> {
+  const agent = getAgent(agentId);
+  if (!agent) throw new Error('员工不存在');
+
+  // 老板的原话先落进私聊界面，让用户立刻看到
+  postMessage({
+    group_id: dmId(agentId),
+    run_id: null,
+    sender_id: 'boss',
+    sender_name: '老板',
+    content,
+    kind: 'human',
+  });
+
+  const target = pickTargetGroup(agentId);
+
+  // 锁定要改的文件：优先从老板的话里提取文件名，否则取群里最近改动过的那个
+  const mentioned = (content.match(/([\w\u4e00-\u9fa5-]+\.(?:md|txt|json|js|ts|py|html|css|yml|yaml|csv))/i) || [])[1];
+  const file = mentioned || (target ? latestFile(target) : null);
+  if (!target || !file) {
+    // 没有可改的文件 / 群，退回普通私聊回复
+    await sendDm(agentId, content);
+    return;
+  }
+
+  const cur = readFile(target, file);
+  const currentText = cur.ok ? cur.output : '';
+  const board = readBoard(target);
+  const groupHistory = getMessages(target, 80)
+    .filter((m) => m.kind === 'chat' || m.kind === 'human')
+    .slice(-16);
+  const privateMem = getMemories(agentId, 'private', 4);
+
+  const sys = [
+    agent.system_prompt,
+    `你是${agent.name}（${agent.role}）。老板在私聊里让你改工作区里的文件，并把结果发回群里。`,
+    `你不需要贴任何工具代码：你只要产出"改好的完整文件内容"和"发到群里的一句话"，系统会帮你真正落盘和发群。`,
+    `用中文，口语化，不要自称 AI，不要 Markdown 大标题。`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const user = `你要处理的是群「${getGroup(target)?.name}」工作区里的文件：${file}
+它的当前内容：
+"""
+${currentText || '（空文件或还不存在）'}
+"""
+
+老板的要求：${content}
+${board ? `\n任务看板（工作区 ${BOARD_FILE}）：\n${board}\n` : ''}
+${
+  groupHistory.length
+    ? `\n群里最近讨论：\n${groupHistory.map((m) => `${m.sender_name}：${m.content.slice(0, 160)}`).join('\n')}\n`
+    : ''
+}
+${privateMem.length ? `\n你的记忆：\n${privateMem.map((m) => `- ${m}`).join('\n')}` : ''}
+
+请只输出一个 JSON 对象，前后不要加任何文字或代码块标记：
+{"content":"改好的完整文件内容（会整体覆盖写回 ${file}）","announce":"发到群里的一句话同步消息，说明你改了什么、建议谁接着看"}
+
+要求：content 必须是改好的完整文件，不要留占位符；如果老板只是要润色，就保留原意只改表述。announce 要口语、带要点。`;
+
+  try {
+    await typing(dmId(agentId), agent, 900 + Math.random() * 1500);
+    const raw = await chat(
+      {
+        tag: 'agent',
+        messages: [
+          { role: 'system' as const, content: sys },
+          { role: 'user' as const, content: user },
+        ],
+        temperature: 0.7,
+        maxTokens: 2200,
+        json: true,
+        audit: { agentId: agent.id, agentName: agent.name },
+      },
+      bindingOf(agent)
+    );
+
+    const obj = parseJsonObj(raw);
+    if (!obj || typeof obj.content !== 'string') throw new Error('模型没有返回可写入的内容');
+
+    // 确定性执行：真正落盘 + 发群，不再依赖模型连发多个工具
+    writeFile(target, file, obj.content);
+    postToGroup(agent, target, obj.announce || `已更新 ${file}：${obj.content.slice(0, 200)}`, null);
+
+    postMessage({
+      group_id: dmId(agentId),
+      run_id: null,
+      sender_id: agent.id,
+      sender_name: agent.name,
+      content: `已按你的要求改好 ${file}，并同步到了群里。`,
+      kind: 'chat',
+    });
+  } catch (e) {
+    postMessage({
+      group_id: dmId(agentId),
+      run_id: null,
+      sender_id: 'system',
+      sender_name: '系统',
+      content: `${agent.name} 没执行成功：${String(e).slice(0, 160)}`,
+      kind: 'system',
+    });
+  }
+}
+
 /* ----------------------------- 事实边界 / @ 点名 ----------------------------- */
 
 /**
@@ -268,7 +473,10 @@ ${privateMem.length ? `\n你自己的记忆：\n${privateMem.map((m) => `- ${m}`
     let wrote = false;
     if (agent.tools_enabled) {
       const call = parseToolCall(text);
-      if (call) {
+      if (call && call.tool === 'post_group') {
+        // 群内发言本就会落在群里，不需要再重复发布
+        text = stripToolBlocks(text);
+      } else if (call) {
         const res = runTool(groupId, call);
         if (!res.ok && /越界/.test(res.output)) logSandboxBlock(groupId, `${agent.name}: ${res.output}`);
         postMessage({
@@ -374,7 +582,7 @@ export function createAgent(input: {
 /** 更新已有员工的模型配置；空 key 表示保留旧 key，避免前端读取或回传密钥。 */
 export function updateAgentConnection(
   id: string,
-  input: { provider?: string; base_url?: string; model?: string; api_key?: string }
+  input: { provider?: string; base_url?: string; model?: string; api_key?: string; reasoning_effort?: string }
 ): Agent {
   const agent = getAgent(id);
   if (!agent) throw new Error('员工不存在');
@@ -383,9 +591,10 @@ export function updateAgentConnection(
   const baseUrl = (input.base_url ?? agent.base_url).trim();
   const model = (input.model ?? agent.model).trim();
   const apiKey = input.api_key?.trim() || agent.api_key;
+  const reasoningEffort = input.reasoning_effort?.trim() || agent.reasoning_effort;
   db()
-    .prepare('UPDATE agents SET provider = ?, base_url = ?, model = ?, api_key = ? WHERE id = ?')
-    .run(provider, baseUrl, model, apiKey, id);
+    .prepare('UPDATE agents SET provider = ?, base_url = ?, model = ?, api_key = ?, reasoning_effort = ? WHERE id = ?')
+    .run(provider, baseUrl, model, apiKey, reasoningEffort, id);
   return getAgent(id)!;
 }
 
@@ -627,6 +836,21 @@ type LeaderOut =
   | { action: 'converge'; summary: string; acceptance: string[] }
   | { action: 'ask_human'; question: string };
 
+/** 从模型输出里抠出一个 JSON 对象（容错：忽略前后废话和代码块标记） */
+function parseJsonObj(raw: string): { content?: string; announce?: string } | null {
+  let s = (raw || '').trim();
+  s = s.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+  const a = s.indexOf('{');
+  const b = s.lastIndexOf('}');
+  if (a < 0 || b < 0) return null;
+  try {
+    const o = JSON.parse(s.slice(a, b + 1));
+    return o && typeof o === 'object' ? o : null;
+  } catch {
+    return null;
+  }
+}
+
 function parseLeaderOut(text: string): LeaderOut | null {
   let raw = text.trim();
   raw = raw.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
@@ -656,22 +880,36 @@ async function leaderTurn(
   const members = getMembers(group.id).filter((a) => a.id !== leader.id);
   const ids = members.map((a) => `${a.id}(${a.name}·${a.role})`).join('、');
 
+  const board = readBoard(group.id);
+  const files = groupFileList(group.id);
+
   const messages = [
     { role: 'system' as const, content: leader.system_prompt },
     {
       role: 'user' as const,
-      content: `你是群「${group.name}」的组长。
+      content: `你是群「${group.name}」的组长，负责把目标拆给对的人、盯进度、判断收工。
 目标：${run.goal}
 当前第 ${run.round} 轮（最多 ${MAX_ROUNDS} 轮）。
 可选成员：${ids}
+${
+  board
+    ? `**任务看板（工作区 ${BOARD_FILE} 的当前内容，必须基于它推进，不要另起炉灶）**：\n${board}\n`
+    : '（还没有任务看板，第一轮请先拆解目标并分派。）'
+}
+当前工作区文件清单：\n${files}
+
 到目前为止的讨论：
 ${digest.length ? digest.map((d, i) => `${i + 1}. ${d}`).join('\n') : '（还没有人发言）'}
 ${humanNotes.length ? `\n老板（人类管理员）的插话：\n${humanNotes.join('\n')}\n请认真对待老板的话。` : ''}
-只输出 JSON，不要其他文字。三选一：
-{"action":"dispatch","items":[{"to":"成员id","instruction":"具体任务"}]}
-{"action":"converge","summary":"结论","acceptance":["验收项"]}
-{"action":"ask_human","question":"要问老板的问题"}
-若信息已足够收敛，用 converge；最多分派 ${Math.min(3, members.length)} 个成员。`,
+
+要求：
+- 只输出 JSON，不要其他文字。三选一：
+  {"action":"dispatch","items":[{"to":"成员id","instruction":"具体任务（要指明参考哪个文件、产出哪个文件"}]}
+  {"action":"converge","summary":"结论","acceptance":["验收项"]}
+  {"action":"ask_human","question":"要问老板的问题"}
+- 看板或文件清单里已有成员写好的产出时，要么指定某人去审查/对接它，要么就收敛；不要假装没看见、每次都从零开始。
+- 讨论里若有人提出了需要拍板的问题（尤其 @ 了你或 @ 了同事），先处理那个问题（dispatch 让它被解决，或你自己 ask_human），不要无视。
+- 只有当关键分派都已有对应产出或成员确认完成时，才用 converge；否则继续分派下一步，最多分派 ${Math.min(3, members.length)} 个成员。`,
     },
   ];
 
@@ -703,8 +941,10 @@ async function agentTurn(
     agent.system_prompt,
     `你的说话风格：${p.tone}。口头禅：${p.catchphrase}。小习惯：${p.quirks.join('；') || '无'}。`,
     `严格要求：用中文口语回复，1-3 句，像在微信群里说话，不要写报告，不要自称 AI，不要用 Markdown 标题。`,
+    `协作纪律：动手前先读工作区的 ${BOARD_FILE} 和上面提到的文件，确认团队当前进度；如果看板里写明了给你的、还没做的活，就接着干。`,
+    `遇到缺信息、和别人方案冲突、或需要有人拍板的事，直接在群里说出来并 @ 负责人（组长或负责那块的同事），把问题摆到台面上等裁断，不要闷头猜、也不要自己擅自拍板。`,
     agent.tools_enabled
-      ? `如果你需要读写文件，回复的最后附一个代码块：\n\`\`\`json\n{"tool":"write_file","args":{"path":"notes.md","content":"内容"}}\n\`\`\`\n可选工具：read_file(path) / write_file(path,content) / list_files()。不要用它做无关的事。`
+      ? `如果你需要读写文件，回复的最后附一个代码块：\n\`\`\`json\n{"tool":"write_file","args":{"path":"notes.md","content":"内容"}}\n\`\`\`\n可选工具：read_file(path) / write_file(path,content) / list_files()。不要用它做无关的事。如果你产出了文件，结尾说清楚你交了什么、建议谁接着看。`
       : '',
   ]
     .filter(Boolean)
@@ -747,7 +987,10 @@ ${privateMem.length ? `你自己的记忆：\n${privateMem.map((m) => `- ${m}`).
   // 一次 ReAct：解析工具调用 → 执行 → 把结果喂回去再要一次最终回复
   if (agent.tools_enabled) {
     const call = parseToolCall(text);
-    if (call) {
+    if (call && call.tool === 'post_group') {
+      // 群内发言本就会落在群里，不需要再重复发布
+      text = stripToolBlocks(text);
+    } else if (call) {
       const res = runTool(group.id, call);
       if (!res.ok && /越界/.test(res.output)) logSandboxBlock(group.id, `${agent.name}: ${res.output}`);
       const toolMsg = postMessage({
@@ -962,6 +1205,9 @@ async function loop(group: Group, run: { id: string; goal: string; round: number
   const instructionLog: Record<string, string[]> = {};
   let round = run.round;
 
+  // 先把任务看板建起来，让成员动手前就能读到"目标 + 当前进度"
+  writeBoard(group.id, run.goal, round, [], '进行中（组长拆解中）');
+
   while (round < MAX_ROUNDS) {
     if (!runIsActive(run.id)) return;
     round++;
@@ -1013,6 +1259,7 @@ async function loop(group: Group, run: { id: string; goal: string; round: number
         content: `收个尾：${out.summary}\n验收项：\n${out.acceptance.map((a, i) => `${i + 1}. ${a}`).join('\n')}`,
         kind: 'chat',
       });
+      writeBoard(group.id, run.goal, round, [], '已完成');
       addMemory(group.leader_id, 'group', `任务「${run.goal}」的结论：${out.summary}`);
       for (const m of members) {
         const own = digest.filter((d) => d.startsWith(`${m.name}：`)).slice(-2);
@@ -1040,6 +1287,35 @@ async function loop(group: Group, run: { id: string; goal: string; round: number
       });
     }
 
+    // 组长把这一轮分派同步到群聊 + 任务看板，让所有人知道谁该干什么
+    const leaderName = getAgent(group.leader_id)?.name ?? '组长';
+    const dispatchLines = items
+      .map((it) => `· ${getAgent(it.to)?.name ?? it.to}：${it.instruction}`)
+      .join('\n');
+    postMessage({
+      group_id: group.id,
+      run_id: run.id,
+      sender_id: group.leader_id,
+      sender_name: leaderName,
+      content: `【第 ${round} 轮分派】\n${dispatchLines}\n（详细看板已写入工作区 ${BOARD_FILE}，大家照着推进）`,
+      kind: 'chat',
+    });
+    writeBoard(
+      group.id,
+      run.goal,
+      round,
+      items.map((it) => ({ name: getAgent(it.to)?.name ?? it.to, instruction: it.instruction })),
+      '进行中'
+    );
+
+    // 给成员喂入当前看板与文件清单，确保它们基于团队进度接着干
+    const wsContext = [
+      `任务看板（工作区 ${BOARD_FILE}）：`,
+      readBoard(group.id) || '（无）',
+      '工作区已有文件：',
+      groupFileList(group.id),
+    ].join('\n');
+
     for (const item of items.slice(0, 4)) {
       if (!runIsActive(run.id)) return;
       const agent = getAgent(item.to);
@@ -1049,7 +1325,7 @@ async function loop(group: Group, run: { id: string; goal: string; round: number
       const delay = lo + Math.random() * Math.max(0, hi - lo);
 
       await typing(group.id, agent, delay);
-      const text = await agentTurn(group, run, agent, item.instruction, digest.slice(-6));
+      const text = await agentTurn(group, run, agent, item.instruction, [wsContext, ...digest.slice(-6)]);
 
       postMessage({
         group_id: group.id,

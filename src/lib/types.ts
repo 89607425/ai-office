@@ -17,6 +17,7 @@ export type Agent = {
   provider: string;
   base_url: string;
   api_key: string;
+  reasoning_effort: string;
   persona: string;
   tools_enabled: number;
   created_at: number;

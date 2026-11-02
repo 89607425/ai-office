@@ -26,6 +26,13 @@ export default function WorkspacePanel({
   const mine = files.filter((f) => f.name.startsWith(groupId + '/') || !f.name.includes('/'));
   const list = mine.length ? mine : files;
 
+  // 打开工作区时默认选中任务看板，让"组长分派 / 当前进度"一眼可见
+  useEffect(() => {
+    if (cur) return;
+    const board = list.find((f) => f.name.endsWith('任务看板.md'));
+    if (board) setCur(board.name.replace(groupId + '/', ''));
+  }, [list, cur, groupId]);
+
   return (
     <div className="absolute inset-y-0 right-0 z-20 flex w-[380px] flex-col border-l border-[#D9D9D9] bg-white shadow-xl">
       <div className="flex h-[48px] shrink-0 items-center border-b border-[#E3E3E3] px-3">

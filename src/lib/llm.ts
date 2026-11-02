@@ -18,7 +18,7 @@ export type LLMCall = {
 
 const PROVIDERS: Record<string, { baseURL: string; model: string }> = {
   deepseek: { baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
-  moonshot: { baseURL: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k' },
+  moonshot: { baseURL: 'https://api.moonshot.cn/v1', model: 'kimi-k3.1-pro' },
   qwen: { baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
   siliconflow: { baseURL: 'https://api.siliconflow.cn/v1', model: 'zai-org/GLM-5.3-Flash' },
 };
@@ -28,7 +28,7 @@ const PROVIDERS: Record<string, { baseURL: string; model: string }> = {
  * 解析优先级：员工档案 > .env.local 全局兜底 > 演示模式。
  */
 export type Binding =
-  | { provider?: string; apiKey?: string; model?: string; baseUrl?: string }
+  | { provider?: string; apiKey?: string; model?: string; baseUrl?: string; reasoningEffort?: string }
   | null
   | undefined;
 
@@ -39,6 +39,7 @@ export type Resolved = {
   key: string;
   provider: string;
   label: string;
+  reasoningEffort: string;
 };
 
 export function resolve(b: Binding): Resolved {
@@ -51,16 +52,17 @@ export function resolve(b: Binding): Resolved {
     (provider === 'custom' ? process.env.LLM_BASE_URL : undefined) ||
     preset?.baseURL ||
     PROVIDERS.deepseek.baseURL;
+  const reasoningEffort = (b?.reasoningEffort || (provider === 'moonshot' ? 'low' : '')).trim().toLowerCase();
 
   if (!key) {
-    return { mode: 'demo', baseURL, model, key: '', provider, label: '演示模式' };
+    return { mode: 'demo', baseURL, model, key: '', provider, label: '演示模式', reasoningEffort };
   }
-  return { mode: 'live', baseURL, model, key, provider, label: `${provider} / ${model}` };
+  return { mode: 'live', baseURL, model, key, provider, label: `${provider} / ${model}`, reasoningEffort };
 }
 
 /** 给 UI 用：这个员工实际会走哪家 */
-export function bindingLabel(a: { provider?: string; api_key?: string; model?: string }): string {
-  return resolve({ provider: a.provider, apiKey: a.api_key, model: a.model }).label;
+export function bindingLabel(a: { provider?: string; api_key?: string; model?: string; reasoning_effort?: string }): string {
+  return resolve({ provider: a.provider, apiKey: a.api_key, model: a.model, reasoningEffort: a.reasoning_effort }).label;
 }
 
 export function provider(): string {
@@ -146,14 +148,19 @@ export async function chat(call: LLMCall, binding?: Binding): Promise<string> {
   }
 
   const url = r.baseURL.replace(/\/$/, '') + '/chat/completions';
+  // Kimi K3.1 Pro 的 Chat Completions 接口只接受 temperature=1；
+  // 调度器的组长/成员流程会分别传 0.7、0.9、0.95，必须在适配层收敛。
+  const temperature = r.provider === 'moonshot' && /^kimi-k3\.1(?:-|$)/i.test(r.model) ? 1 : call.temperature ?? 0.85;
   const body: Record<string, unknown> = {
     model: r.model,
     messages: call.messages,
-    temperature: call.temperature ?? 0.85,
+    temperature,
     max_tokens: call.maxTokens ?? 700,
     stream: false,
   };
   if (call.json && r.provider !== 'qwen') body.response_format = { type: 'json_object' };
+  // Kimi K3 系列的最低推理档位是 low；不能关闭 K3.1 Pro 的推理。
+  if (r.provider === 'moonshot' && r.reasoningEffort) body.reasoning_effort = r.reasoningEffort;
 
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 120000);

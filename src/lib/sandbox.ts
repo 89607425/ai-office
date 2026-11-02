@@ -100,8 +100,29 @@ export function workspaceTree(): { name: string; size: number }[] {
   }
 }
 
+/** 取某群工作区里最近被改动过的文件（相对名），用于"把刚才群里写的改了"这类没有明确文件名的指令 */
+export function latestFile(group_id: string): string | null {
+  try {
+    const root = rootFor(group_id);
+    const files = fs
+      .readdirSync(root)
+      .filter((f) => fs.statSync(path.join(root, f)).isFile());
+    if (!files.length) return null;
+    files.sort(
+      (a, b) =>
+        fs.statSync(path.join(root, b)).mtimeMs - fs.statSync(path.join(root, a)).mtimeMs
+    );
+    return files[0];
+  } catch {
+    return null;
+  }
+}
+
 /** agent 输出里最后一个 ```json 代码块会被当作工具调用 */
-export type ToolCall = { tool: 'read_file' | 'write_file' | 'list_files'; args: Record<string, string> };
+export type ToolCall = {
+  tool: 'read_file' | 'write_file' | 'list_files' | 'post_group';
+  args: Record<string, string>;
+};
 
 /**
  * 输出被 max_tokens 截断时，最后一个代码块常常没有闭合的 ```。
@@ -124,7 +145,7 @@ export function parseToolCall(text: string): ToolCall | null {
   try {
     const obj = JSON.parse(raw) as ToolCall;
     if (!obj || typeof obj.tool !== 'string') return null;
-    if (!['read_file', 'write_file', 'list_files'].includes(obj.tool)) return null;
+    if (!['read_file', 'write_file', 'list_files', 'post_group'].includes(obj.tool)) return null;
     return obj;
   } catch {
     return null;
@@ -147,6 +168,9 @@ export function runTool(group_id: string, call: ToolCall): ToolResult {
       return writeFile(group_id, call.args.path || 'untitled.md', call.args.content || '');
     case 'list_files':
       return listFiles(group_id);
+    // post_group 由调度内核在群内真实发送；这里只给一个软成功，避免被当成未知工具丢弃
+    case 'post_group':
+      return { ok: true, output: '（已在群内发布，由调度内核发送）' };
     default:
       return { ok: false, output: '未知工具' };
   }

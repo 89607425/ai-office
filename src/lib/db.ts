@@ -20,6 +20,7 @@ function createDb(): Database.Database {
       provider TEXT NOT NULL DEFAULT '',
       base_url TEXT NOT NULL DEFAULT '',
       api_key TEXT NOT NULL DEFAULT '',
+      reasoning_effort TEXT NOT NULL DEFAULT '',
       persona TEXT NOT NULL,
       tools_enabled INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL
@@ -133,6 +134,7 @@ function migrate(d: Database.Database): void {
   if (!agentCols.includes('provider')) d.exec('ALTER TABLE agents ADD COLUMN provider TEXT NOT NULL DEFAULT ""');
   if (!agentCols.includes('base_url')) d.exec('ALTER TABLE agents ADD COLUMN base_url TEXT NOT NULL DEFAULT ""');
   if (!agentCols.includes('api_key')) d.exec('ALTER TABLE agents ADD COLUMN api_key TEXT NOT NULL DEFAULT ""');
+  if (!agentCols.includes('reasoning_effort')) d.exec('ALTER TABLE agents ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ""');
 }
 
 let _db: Database.Database | null = null;

@@ -17,7 +17,7 @@ const PROVIDERS = [
 
 const DEFAULT_MODELS: Record<string, string> = {
   deepseek: 'deepseek-chat',
-  moonshot: 'moonshot-v1-8k',
+  moonshot: 'kimi-k3.1-pro',
   qwen: 'qwen-plus',
   siliconflow: 'zai-org/GLM-5.3-Flash',
 };
@@ -297,6 +297,7 @@ function ConnectionForm({
     base_url: agent.base_url || '',
     model: agent.model || '',
     api_key: '',
+    reasoning_effort: agent.reasoning_effort || '',
   });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -350,7 +351,7 @@ function ConnectionForm({
     <div className="rounded-lg border border-[#07C160] bg-white p-4">
       <div className="mb-1 text-[13.5px] font-medium text-[#191919]">配置 {agent.name} 的模型连接</div>
       <div className="mb-3 text-[11px] text-[#8A8A8A]">现有密钥不会展示；留空即保留原密钥。检测不会发送聊天内容。</div>
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-4 gap-3">
         <Field label="厂商">
           <select value={f.provider} onChange={(e) => set('provider', e.target.value)} className={inputCls}>
             {PROVIDERS.filter((p) => p.id).map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
@@ -361,6 +362,14 @@ function ConnectionForm({
         </Field>
         <Field label="新的 API Key">
           <input type="password" value={f.api_key} onChange={(e) => set('api_key', e.target.value)} placeholder={agent.key_set ? `当前 ${agent.key_hint}` : 'sk-...'} className={inputCls} />
+        </Field>
+        <Field label="推理档位（Kimi）">
+          <select value={f.reasoning_effort} onChange={(e) => set('reasoning_effort', e.target.value)} className={inputCls}>
+            <option value="">厂商默认</option>
+            <option value="low">低（推荐）</option>
+            <option value="high">高</option>
+            <option value="max">最高</option>
+          </select>
         </Field>
       </div>
       <div className="mt-3">
