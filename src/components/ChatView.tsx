@@ -25,17 +25,38 @@ export default function ChatView({
   onReload: () => void;
   onOptimistic: (m: Message) => void;
 }) {
-  const [goal, setGoal] = useState('');
+  const [goal, setGoal] = useState<string>(() => (typeof window !== 'undefined' ? localStorage.getItem('ai-office:defaultGoal') || '' : ''));
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [showWs, setShowWs] = useState(false);
   const [files, setFiles] = useState<{ name: string; size: number }[]>([]);
   const [showLogs, setShowLogs] = useState(false);
   const [logs, setLogs] = useState<{ id: string; agent_name: string | null; tag: string; provider: string; model: string; attempt: number; duration_ms: number; success: number; error: string | null; created_at: number }[]>([]);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState('');
+  const [mentionStart, setMentionStart] = useState(0);
+
+  function chooseMention(name: string) {
+    const ta = taRef.current;
+    const pos = ta?.selectionStart ?? draft.length;
+    const before = draft.slice(0, mentionStart);
+    const after = draft.slice(pos);
+    const next = `${before}@${name} ${after}`;
+    setDraft(next);
+    setMentionOpen(false);
+    requestAnimationFrame(() => {
+      ta?.focus();
+      const c = before.length + name.length + 2;
+      ta?.setSelectionRange(c, c);
+    });
+  }
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const messages = mode === 'group' ? group?.messages ?? [] : dm?.messages ?? [];
   const members = mode === 'group' ? group?.members ?? [] : dm ? [dm.agent] : [];
+  const mentionMatches =
+    mode === 'group' ? members.filter((m) => m.name.toLowerCase().includes(mentionQuery.toLowerCase())).slice(0, 8) : [];
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -66,6 +87,7 @@ export default function ChatView({
     const t = draft.trim();
     if (!t) return;
     setDraft('');
+    setMentionOpen(false);
     const sessionId = mode === 'group' ? group?.id : dm?.id;
     if (sessionId) {
       // 先插一条临时气泡，发出去那一刻就能看见，不用等服务端往返
@@ -212,25 +234,28 @@ export default function ChatView({
                 <div ref={bottomRef} />
       </div>
 
-      <div className="shrink-0 border-t border-[#E3E3E3] bg-[#F5F5F5]">
-        {mode === 'group' && members.length > 0 && (
-          <div className="flex flex-wrap items-center gap-1 px-4 pt-2">
-            <span className="text-[11px] text-[#8A8A8A]">点名：</span>
-            {members.map((m) => (
+      <div className="relative shrink-0 border-t border-[#E3E3E3] bg-[#F5F5F5]">
+        {mode === 'group' && mentionOpen && mentionMatches.length > 0 && (
+          <div className="absolute bottom-full left-4 right-4 mb-2 max-h-[220px] overflow-y-auto rounded-lg border border-[#E0E0E0] bg-white shadow-lg">
+            <div className="sticky top-0 bg-[#FAFAFA] px-3 py-1.5 text-[11px] text-[#8A8A8A] border-b border-[#F0F0F0]">
+              输入 @ 后自动列出当前群成员，点选即可 @ 他
+            </div>
+            {mentionMatches.map((m) => (
               <button
                 key={m.id}
-                onClick={() => setDraft((d) => (d.includes(`@${m.name}`) ? d : `${d}@${m.name} `.trimStart()))}
-                className="rounded border border-[#E0E0E0] bg-white px-1.5 py-[2px] text-[11px] text-[#576B95] hover:border-[#07C160]"
+                type="button"
+                onClick={() => chooseMention(m.name)}
+                className="block w-full px-3 py-1.5 text-left text-[13px] text-[#191919] hover:bg-[#F2F7F2]"
               >
-                @{m.name}
+                <span className="text-[#576B95]">@{m.name}</span>
+                <span className="ml-2 text-[11px] text-[#B0B0B0]">{m.role}</span>
               </button>
             ))}
-            <span className="ml-1 text-[10px] text-[#B0B0B0]">被 @ 的人会当场回你</span>
           </div>
         )}
         <div className="flex items-center gap-2 px-4 pt-2 text-[11px] text-[#8A8A8A]">
           <span>老板（你）</span>
-          {mode === 'group' && <span>· 你的话会在下一轮被组长读到</span>}
+          {mode === 'group' && <span>· 你的话会在下一轮被组长读到 · 输入 @ 可点名当前群成员</span>}
           {mode === 'dm' && <span>· 直接对话，它会立刻回你</span>}
           <button onClick={onReload} className="ml-auto hover:text-[#07C160]">
             刷新
@@ -238,16 +263,45 @@ export default function ChatView({
         </div>
         <div className="flex items-end gap-2 px-4 py-2">
           <textarea
+            ref={taRef}
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => {
+              const val = e.target.value;
+              const pos = e.target.selectionStart ?? val.length;
+              setDraft(val);
+              if (mode === 'group') {
+                const before = val.slice(0, pos);
+                const at = before.lastIndexOf('@');
+                if (at >= 0 && !/\s/.test(before.slice(at + 1))) {
+                  setMentionOpen(true);
+                  setMentionQuery(before.slice(at + 1));
+                  setMentionStart(at);
+                } else {
+                  setMentionOpen(false);
+                }
+              } else {
+                setMentionOpen(false);
+              }
+            }}
             onKeyDown={(e) => {
+              if (mentionOpen && mentionMatches.length) {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  chooseMention(mentionMatches[0].name);
+                  return;
+                }
+                if (e.key === 'Escape') {
+                  setMentionOpen(false);
+                  return;
+                }
+              }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 void send();
               }
             }}
             rows={2}
-            placeholder={mode === 'group' ? '以老板身份插话…' : '直接跟它说…'}
+            placeholder={mode === 'group' ? '以老板身份插话…（输入 @ 点名）' : '直接跟它说…'}
             className="min-h-[52px] flex-1 resize-none rounded border border-[#D9D9D9] bg-white px-3 py-2 text-[13px] outline-none focus:border-[#07C160]"
           />
           <button

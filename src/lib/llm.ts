@@ -155,7 +155,7 @@ export async function chat(call: LLMCall, binding?: Binding): Promise<string> {
     model: r.model,
     messages: call.messages,
     temperature,
-    max_tokens: call.maxTokens ?? 700,
+    max_tokens: call.maxTokens ?? 8000,
     stream: false,
   };
   if (call.json && r.provider !== 'qwen') body.response_format = { type: 'json_object' };
@@ -165,25 +165,42 @@ export async function chat(call: LLMCall, binding?: Binding): Promise<string> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 120000);
 
-  const call1 = async (payload: Record<string, unknown>, attempt: number): Promise<string> => {
+  const callOnce = async (payload: Record<string, unknown>, attempt: number): Promise<string> => {
     const startedAt = Date.now();
     try {
       const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${r.key}`,
-      },
-      body: JSON.stringify(payload),
-      signal: ctrl.signal,
-    });
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${r.key}`,
+        },
+        body: JSON.stringify(payload),
+        signal: ctrl.signal,
+      });
+      const t = await res.text().catch(() => '');
       if (!res.ok) {
-        const t = await res.text().catch(() => '');
-        throw new Error(`LLM ${res.status}: ${t.slice(0, 300)}`);
+        const isHtml = /^\s*<(!doctype|html)/i.test(t);
+        const detail = isHtml
+          ? '（中转站/网关返回了 HTML 页面，通常是 base_url、模型名或 API Key 不对，请检查连接配置）'
+          : t.slice(0, 300);
+        const err = new Error(`LLM ${res.status}: ${detail}`);
+        writeLog(attempt, startedAt, false, err);
+        throw err;
       }
-      const json = (await res.json()) as {
-        choices?: { message?: { content?: string; reasoning_content?: string } }[];
-      };
+      // 有的中转站成功时也吐 HTML（错误页），先拦下来，避免 JSON.parse 抛看不懂的错
+      if (/^\s*<(!doctype|html)/i.test(t)) {
+        const err = new Error(`LLM 返回 200 但响应不是 JSON（疑似中转站返回了 HTML 错误页）：\n${t.slice(0, 300)}`);
+        writeLog(attempt, startedAt, false, err);
+        throw err;
+      }
+      let json: { choices?: { message?: { content?: string; reasoning_content?: string } }[] };
+      try {
+        json = JSON.parse(t) as typeof json;
+      } catch {
+        const err = new Error(`LLM 响应不是合法 JSON：\n${t.slice(0, 300)}`);
+        writeLog(attempt, startedAt, false, err);
+        throw err;
+      }
       const msg = json.choices?.[0]?.message ?? {};
       const content = (msg.content ?? '').trim();
       writeLog(attempt, startedAt, true);
@@ -195,13 +212,32 @@ export async function chat(call: LLMCall, binding?: Binding): Promise<string> {
     }
   };
 
+  // 只有网络抖动 / 网关 5xx / 限流才重试；配置类错误（HTML、非法 JSON）不重试
+  const shouldRetry = (e: unknown): boolean =>
+    /LLM 5\d\d|429|fetch failed|aborted|network|timeout/i.test(String(e));
+
   try {
-    let out = await call1(body, 1);
-    if (!out) {
-      // 推理模型（deepseek-v4-pro 这类）会把 token 全烧在 reasoning 上，
-      // content 直接为空。加大预算再要一次，否则组长永远吐不出 JSON。
-      out = await call1({ ...body, max_tokens: Math.min(8000, (call.maxTokens ?? 700) * 4) }, 2);
+    let out = '';
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const bump = attempt === 2 && out === ''; // 上一轮是空内容（推理模型烧 token）才加预算
+      const payload = bump ? { ...body, max_tokens: Math.min(16000, (call.maxTokens ?? 8000) * 4) } : body;
+      try {
+        const r2 = await callOnce(payload, attempt);
+        if (r2) {
+          out = r2;
+          lastErr = null;
+          break;
+        }
+        lastErr = new Error('模型返回了空内容（可能把 token 全烧在推理上），已加预算重试');
+        if (attempt === 3) break;
+      } catch (e) {
+        lastErr = e;
+        if (!shouldRetry(e) || attempt === 3) throw e;
+        await new Promise((r) => setTimeout(r, 600 * attempt));
+      }
     }
+    if (lastErr && !out) throw lastErr;
     return out;
   } finally {
     clearTimeout(timer);

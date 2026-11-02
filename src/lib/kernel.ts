@@ -64,7 +64,7 @@ export function writeBoard(
     '## 本轮分派',
     lines,
     '',
-    '> 这是组长维护的共享看板。成员动手前先读它，按上面的分派接着干；干完在群里同步进度、把产出落到工作区。',
+    '> 这是组长维护的进度速览，方便大家随时回看；日常协作以群聊里的 @ 分派为准，必要时才读它。干完在群里同步进度、把产出落到工作区。',
   ].join('\n');
   writeFile(groupId, BOARD_FILE, md);
 }
@@ -348,7 +348,7 @@ ${privateMem.length ? `\n你的记忆：\n${privateMem.map((m) => `- ${m}`).join
           { role: 'user' as const, content: user },
         ],
         temperature: 0.7,
-        maxTokens: 2200,
+        maxTokens: 8000,
         json: true,
         audit: { agentId: agent.id, agentName: agent.name },
       },
@@ -467,7 +467,7 @@ ${privateMem.length ? `\n你自己的记忆：\n${privateMem.map((m) => `- ${m}`
   ];
 
   try {
-    let text = await chat({ tag: 'agent', messages, temperature: 0.9, maxTokens: 1600, audit: { groupId, agentId: agent.id, agentName: agent.name } }, bindingOf(agent));
+    let text = await chat({ tag: 'agent', messages, temperature: 0.9, maxTokens: 8000, audit: { groupId, agentId: agent.id, agentName: agent.name } }, bindingOf(agent));
 
     // 和群聊主循环一样，@ 点名也必须真的能干活 —— 这里要有工具循环
     let wrote = false;
@@ -582,7 +582,7 @@ export function createAgent(input: {
 /** 更新已有员工的模型配置；空 key 表示保留旧 key，避免前端读取或回传密钥。 */
 export function updateAgentConnection(
   id: string,
-  input: { provider?: string; base_url?: string; model?: string; api_key?: string; reasoning_effort?: string }
+  input: { provider?: string; base_url?: string; model?: string; api_key?: string; reasoning_effort?: string; role?: string; system_prompt?: string }
 ): Agent {
   const agent = getAgent(id);
   if (!agent) throw new Error('员工不存在');
@@ -592,9 +592,11 @@ export function updateAgentConnection(
   const model = (input.model ?? agent.model).trim();
   const apiKey = input.api_key?.trim() || agent.api_key;
   const reasoningEffort = input.reasoning_effort?.trim() || agent.reasoning_effort;
+  const role = input.role?.trim() || agent.role;
+  const systemPrompt = input.system_prompt?.trim() || agent.system_prompt;
   db()
-    .prepare('UPDATE agents SET provider = ?, base_url = ?, model = ?, api_key = ?, reasoning_effort = ? WHERE id = ?')
-    .run(provider, baseUrl, model, apiKey, reasoningEffort, id);
+    .prepare('UPDATE agents SET provider = ?, base_url = ?, model = ?, api_key = ?, reasoning_effort = ?, role = ?, system_prompt = ? WHERE id = ?')
+    .run(provider, baseUrl, model, apiKey, reasoningEffort, role, systemPrompt, id);
   return getAgent(id)!;
 }
 
@@ -893,7 +895,7 @@ async function leaderTurn(
 可选成员：${ids}
 ${
   board
-    ? `**任务看板（工作区 ${BOARD_FILE} 的当前内容，必须基于它推进，不要另起炉灶）**：\n${board}\n`
+    ? `**任务看板（工作区 ${BOARD_FILE}，进度速览，不必逐字照念）**：\n${board}\n`
     : '（还没有任务看板，第一轮请先拆解目标并分派。）'
 }
 当前工作区文件清单：\n${files}
@@ -907,8 +909,9 @@ ${humanNotes.length ? `\n老板（人类管理员）的插话：\n${humanNotes.j
   {"action":"dispatch","items":[{"to":"成员id","instruction":"具体任务（要指明参考哪个文件、产出哪个文件"}]}
   {"action":"converge","summary":"结论","acceptance":["验收项"]}
   {"action":"ask_human","question":"要问老板的问题"}
-- 看板或文件清单里已有成员写好的产出时，要么指定某人去审查/对接它，要么就收敛；不要假装没看见、每次都从零开始。
+- 把任务**在群里 @ 对应成员说清楚**是你的主要推进手段，像真实组长那样面对面分工，不要只靠文档。看板/文件清单里已有成员写好的产出时，要么指定某人去审查/对接它，要么就收敛；不要假装没看见、每次都从零开始。
 - 讨论里若有人提出了需要拍板的问题（尤其 @ 了你或 @ 了同事），先处理那个问题（dispatch 让它被解决，或你自己 ask_human），不要无视。
+- 不要为了"留档"强迫成员写没必要的文件：只有任务确实要交付文档/代码/清单时才让它写文件；纯沟通对齐在群里说清即可。
 - 只有当关键分派都已有对应产出或成员确认完成时，才用 converge；否则继续分派下一步，最多分派 ${Math.min(3, members.length)} 个成员。`,
     },
   ];
@@ -916,7 +919,7 @@ ${humanNotes.length ? `\n老板（人类管理员）的插话：\n${humanNotes.j
   let raw = '';
   try {
     raw = await chat(
-      { tag: 'leader', messages, temperature: 0.7, json: true, maxTokens: 1800, audit: { runId: run.id, groupId: group.id, agentId: leader.id, agentName: leader.name } },
+      { tag: 'leader', messages, temperature: 0.7, json: true, maxTokens: 3000, audit: { runId: run.id, groupId: group.id, agentId: leader.id, agentName: leader.name } },
       bindingOf(leader)
     );
   } catch (e) {
@@ -933,15 +936,15 @@ async function agentTurn(
   agent: Agent,
   instruction: string,
   related: string[]
-): Promise<string> {
+): Promise<{ text: string; wroteFile: boolean }> {
   const p = parsePersona(agent.persona);
   const privateMem = getMemories(agent.id, 'private', 3);
 
   const sys = [
     agent.system_prompt,
     `你的说话风格：${p.tone}。口头禅：${p.catchphrase}。小习惯：${p.quirks.join('；') || '无'}。`,
-    `严格要求：用中文口语回复，1-3 句，像在微信群里说话，不要写报告，不要自称 AI，不要用 Markdown 标题。`,
-    `协作纪律：动手前先读工作区的 ${BOARD_FILE} 和上面提到的文件，确认团队当前进度；如果看板里写明了给你的、还没做的活，就接着干。`,
+    `严格要求：用中文口语回复，像在微信群里说话，不要自称 AI，不要用 Markdown 标题。一般性讨论 1-3 句即可；但如果你的任务是要产出文件/文档/代码，正文请写进 write_file 的内容里（可以写很长、很完整），群里只回一句"已写出 XXX"。`,
+    `协作纪律：主要靠群聊推进，组长在群里 @ 你时会把任务说清楚，照着干即可；任务看板只是进度速览，有必要时才去读。需要和其他人配合时，直接在群里 @ 对方沟通，像真实团队一样。`,
     `遇到缺信息、和别人方案冲突、或需要有人拍板的事，直接在群里说出来并 @ 负责人（组长或负责那块的同事），把问题摆到台面上等裁断，不要闷头猜、也不要自己擅自拍板。`,
     agent.tools_enabled
       ? `如果你需要读写文件，回复的最后附一个代码块：\n\`\`\`json\n{"tool":"write_file","args":{"path":"notes.md","content":"内容"}}\n\`\`\`\n可选工具：read_file(path) / write_file(path,content) / list_files()。不要用它做无关的事。如果你产出了文件，结尾说清楚你交了什么、建议谁接着看。`
@@ -964,7 +967,8 @@ ${privateMem.length ? `你自己的记忆：\n${privateMem.map((m) => `- ${m}`).
   ];
 
   const bind = bindingOf(agent);
-  let text = await chat({ tag: 'agent', messages, temperature: 0.9, maxTokens: 1600, audit: { runId: run.id, groupId: group.id, agentId: agent.id, agentName: agent.name } }, bind);
+  let wroteFile = false;
+  let text = await chat({ tag: 'agent', messages, temperature: 0.9, maxTokens: 8000, audit: { runId: run.id, groupId: group.id, agentId: agent.id, agentName: agent.name } }, bind);
 
   // 复读检测必须放在工具执行之前：否则被丢弃的第一版回复已经把工具跑了一遍，
   // 群里会留下两条一模一样的工具消息
@@ -990,9 +994,10 @@ ${privateMem.length ? `你自己的记忆：\n${privateMem.map((m) => `- ${m}`).
     if (call && call.tool === 'post_group') {
       // 群内发言本就会落在群里，不需要再重复发布
       text = stripToolBlocks(text);
-    } else if (call) {
-      const res = runTool(group.id, call);
-      if (!res.ok && /越界/.test(res.output)) logSandboxBlock(group.id, `${agent.name}: ${res.output}`);
+    }         else if (call) {
+          const res = runTool(group.id, call);
+          if (res.ok && call.tool === 'write_file') wroteFile = true;
+          if (!res.ok && /越界/.test(res.output)) logSandboxBlock(group.id, `${agent.name}: ${res.output}`);
       const toolMsg = postMessage({
         group_id: group.id,
         run_id: run.id,
@@ -1022,7 +1027,7 @@ ${privateMem.length ? `你自己的记忆：\n${privateMem.map((m) => `- ${m}`).
   }
 
   text = stripToolBlocks(text);
-  return text || '……';
+  return { text: text || '……', wroteFile };
 }
 
 /* ----------------------------- 越级汇报 ----------------------------- */
@@ -1187,6 +1192,7 @@ export async function processOneRunJob(): Promise<{ processed: boolean; runId?: 
     const attempts = job.attempts + 1;
     const message = String(error).slice(0, 500);
     if (attempts >= 3) {
+      writeBoard(run.group_id, run.goal, run.round, [], '异常/已中止（重试失败）');
       setStatus(run.id, 'error', run.round);
       d.prepare("UPDATE run_jobs SET status = 'failed', locked_until = NULL, last_error = ?, updated_at = ? WHERE id = ?").run(message, Date.now(), job.id);
       return { processed: true, runId: run.id, status: 'failed' };
@@ -1297,7 +1303,7 @@ async function loop(group: Group, run: { id: string; goal: string; round: number
       run_id: run.id,
       sender_id: group.leader_id,
       sender_name: leaderName,
-      content: `【第 ${round} 轮分派】\n${dispatchLines}\n（详细看板已写入工作区 ${BOARD_FILE}，大家照着推进）`,
+      content: `【第 ${round} 轮分派】\n${dispatchLines}\n（分工以群里 @ 你的内容为准，需要回看时可打开工作区 ${BOARD_FILE}）`,
       kind: 'chat',
     });
     writeBoard(
@@ -1325,7 +1331,8 @@ async function loop(group: Group, run: { id: string; goal: string; round: number
       const delay = lo + Math.random() * Math.max(0, hi - lo);
 
       await typing(group.id, agent, delay);
-      const text = await agentTurn(group, run, agent, item.instruction, [wsContext, ...digest.slice(-6)]);
+      const turn = await agentTurn(group, run, agent, item.instruction, [wsContext, ...digest.slice(-6)]);
+      const text = turn.text;
 
       postMessage({
         group_id: group.id,
@@ -1335,7 +1342,7 @@ async function loop(group: Group, run: { id: string; goal: string; round: number
         content: text,
         kind: 'chat',
       });
-      saveMentionedFile(group.id, agent.name, text);
+      if (!turn.wroteFile) saveMentionedFile(group.id, agent.name, text);
       digest.push(`${agent.name}：${text}`);
       spoken.add(agent.id);
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import type { AgentPublic, Group } from '@/lib/types';
 import Avatar, { colorOf } from './Avatar';
 
@@ -105,6 +105,7 @@ export default function ContactsView({
 
       <div className="min-h-0 flex-1 overflow-y-auto bg-[#F5F5F5] px-6 py-4">
         <div className="mx-auto max-w-[760px] space-y-5">
+          <TaskPresetCard />
           {panel === 'agent' && <NewAgentForm onDone={() => { setPanel('none'); onReload(); }} />}
           {panel === 'group' && (
             <NewGroupForm agents={agents} onDone={() => { setPanel('none'); onReload(); }} />
@@ -298,6 +299,8 @@ function ConnectionForm({
     model: agent.model || '',
     api_key: '',
     reasoning_effort: agent.reasoning_effort || '',
+    role: agent.role || '',
+    system_prompt: agent.system_prompt || '',
   });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -375,6 +378,16 @@ function ConnectionForm({
       <div className="mt-3">
         <Field label="接口地址（自定义厂商时必填）">
           <input value={f.base_url} onChange={(e) => set('base_url', e.target.value)} placeholder="留空使用官方默认地址" className={inputCls} />
+        </Field>
+      </div>
+      <div className="mt-3">
+        <Field label="岗位 / 角色（换角色用）">
+          <input value={f.role} onChange={(e) => set('role', e.target.value)} placeholder="比如 后端开发" className={inputCls} />
+        </Field>
+      </div>
+      <div className="mt-3">
+        <Field label="人设（换角色用，决定它怎么说话和思考）">
+          <textarea value={f.system_prompt} onChange={(e) => set('system_prompt', e.target.value)} rows={3} placeholder="你是什么性格、遇到需求怎么反应" className={`${inputCls} resize-none`} />
         </Field>
       </div>
       {notice && <div className="mt-2 text-[12px] text-[#07A853]">{notice}</div>}
@@ -641,6 +654,54 @@ function NewGroupForm({ agents, onDone }: { agents: AgentPublic[]; onDone: () =>
           取消
         </button>
         <span className="ml-auto text-[11px] text-[#9A9A8A]">至少选 2 个人</span>
+      </div>
+    </div>
+  );
+}
+
+function TaskPresetCard() {
+  const KEY = 'ai-office:defaultGoal';
+  const [text, setText] = useState('');
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    setText(localStorage.getItem(KEY) || '');
+  }, []);
+  function save() {
+    localStorage.setItem(KEY, text);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1500);
+  }
+  function clear() {
+    localStorage.removeItem(KEY);
+    setText('');
+  }
+  return (
+    <div className="rounded-lg border border-[#07C160] bg-white p-4">
+      <div className="mb-1 text-[13.5px] font-medium text-[#191919]">任务设定（默认任务模板）</div>
+      <div className="mb-2 text-[11px] text-[#8A8A8A]">
+        写一段默认的下发任务，点“保存”后，下次在任何群打开任务输入框会自动带入，方便反复调试不同角色 / 任务组合。
+      </div>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={3}
+        placeholder="例如：为下周三的版本发布写一份《上线检查清单》，覆盖研发 / 测试 / 运营，每方面至少 3 条…"
+        className={`${inputCls} resize-none`}
+      />
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          onClick={save}
+          className="rounded bg-[#07C160] px-3 py-1.5 text-[12.5px] text-white hover:bg-[#06AD56]"
+        >
+          保存为默认任务
+        </button>
+        <button
+          onClick={clear}
+          className="rounded border border-[#D9D9D9] px-3 py-1.5 text-[12.5px] text-[#8A8A8A]"
+        >
+          清空
+        </button>
+        {saved && <span className="text-[12px] text-[#07A853]">已保存</span>}
       </div>
     </div>
   );

@@ -43,8 +43,8 @@ function resolveSafe(group_id: string, rel: string): string | null {
   return abs;
 }
 
-const MAX_READ = 8000;
-const MAX_WRITE = 20000;
+const MAX_READ = 16000;
+const MAX_WRITE = 60000;
 
 export function readFile(group_id: string, rel: string): ToolResult {
   const abs = resolveSafe(group_id, rel);
