@@ -3,7 +3,6 @@
 import { useState } from 'react';
 import type { AgentPublic, Moment, MomentComment } from '@/lib/types';
 import Avatar from './Avatar';
-import { colorOf } from './Avatar';
 
 export default function MomentsView({
   moments,
@@ -79,7 +78,7 @@ export default function MomentsView({
                   onClick={() => void publish(a.id)}
                   className="flex items-center gap-1 rounded border border-[#E0E0E0] bg-white px-2 py-1 text-[11px] text-[#6B6B6B] hover:border-[#07C160]"
                 >
-                  <span style={{ color: colorOf(a.id) }}>{a.avatar}</span>
+                  <Avatar id={a.id} text={a.avatar} size={16} />
                   让 {a.name} 发
                 </button>
               ))}

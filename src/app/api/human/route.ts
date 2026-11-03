@@ -50,9 +50,35 @@ export async function POST(req: Request) {
 
   // @ 了谁，谁就必须当场回话（即时响应）
   const members = getMembers(groupId);
-  const mentioned = members.filter((m) => isMentioned(content, m.name));
 
-  await Promise.all(mentioned.slice(0, 3).map((m) => replyInGroup(groupId, m.id, content, runId)));
+  // 「艾特所有人」：@所有人 / @all（含大小写、全角＠）命中即全员回话，不再有 3 人上限
+  const AT_ALL = ['@所有人', '@All', '@ALL', '@all', '＠所有人', '＠all'];
+  const atAll = AT_ALL.some((k) => content.includes(k));
 
-  return NextResponse.json({ ok: true, runId, notes, mentioned: mentioned.map((m) => m.name) });
+  const mentioned = atAll ? members.slice() : members.filter((m) => isMentioned(content, m.name));
+
+  // 给一条系统回执，避免"发完一句话群里一片安静"无从排查
+  if (atAll) {
+    postMessage({
+      group_id: groupId,
+      run_id: runId,
+      sender_id: 'system',
+      sender_name: '系统',
+      content: `已触发「艾特所有人」，共 ${mentioned.length} 人当场回话。`,
+      kind: 'system',
+    });
+  } else if (mentioned.length === 0) {
+    postMessage({
+      group_id: groupId,
+      run_id: runId,
+      sender_id: 'system',
+      sender_name: '系统',
+      content: '这条消息没有匹配到任何成员（@ 后面跟群里真实名字，或输入 @所有人 全员点名）。',
+      kind: 'system',
+    });
+  }
+
+  await Promise.all(mentioned.map((m) => replyInGroup(groupId, m.id, content, runId)));
+
+  return NextResponse.json({ ok: true, runId, atAll, notes, mentioned: mentioned.map((m) => m.name) });
 }

@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import type { AgentPublic, Group } from '@/lib/types';
-import Avatar, { colorOf } from './Avatar';
+import Avatar from './Avatar';
 import AiIcon, { AI_ICON_META } from './aiIcons';
 
 type GroupFull = Group & { members: AgentPublic[]; messages: { id: string }[] };
@@ -611,7 +611,7 @@ function NewGroupForm({ agents, onDone }: { agents: AgentPublic[]; onDone: () =>
                   : 'border-[#D9D9D9] bg-white text-[#6B6B6B]'
               }`}
             >
-              <span style={{ color: colorOf(a.id) }}>{a.avatar}</span>
+              <Avatar id={a.id} text={a.avatar} size={16} />
               {a.name}
             </button>
           ))}

@@ -406,9 +406,7 @@ function SessionRow({
     >
       <div className="grid h-[36px] w-[36px] grid-cols-2 grid-rows-2 overflow-hidden rounded-md bg-[#C8C8C8]">
         {composite.slice(0, 4).map((c, i) => (
-          <div key={i} className="flex items-center justify-center text-[10px] text-white">
-            {c}
-          </div>
+          <Avatar key={i} id={`c-${c}`} text={c} size={18} radius={0} />
         ))}
       </div>
       <div className="min-w-0 flex-1">

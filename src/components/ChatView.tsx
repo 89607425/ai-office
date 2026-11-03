@@ -58,6 +58,10 @@ export default function ChatView({
   const members = mode === 'group' ? group?.members ?? [] : dm ? [dm.agent] : [];
   const mentionMatches =
     mode === 'group' ? members.filter((m) => m.name.toLowerCase().includes(mentionQuery.toLowerCase())).slice(0, 8) : [];
+  // 当查询为空 / 含 all / 含"所有人"时，在联想列表顶部提供"艾特所有人"
+  const showAllOption =
+    mode === 'group' &&
+    (mentionQuery === '' || '所有人'.includes(mentionQuery) || mentionQuery.toLowerCase().includes('all'));
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -246,11 +250,24 @@ export default function ChatView({
       </div>
 
       <div className="relative shrink-0 border-t border-[#E3E3E3] bg-[#F5F5F5]">
-        {mode === 'group' && mentionOpen && mentionMatches.length > 0 && (
+        {mode === 'group' && mentionOpen && (mentionMatches.length > 0 || showAllOption) && (
           <div className="absolute bottom-full left-4 right-4 mb-2 max-h-[220px] overflow-y-auto rounded-lg border border-[#E0E0E0] bg-white shadow-lg">
             <div className="sticky top-0 bg-[#FAFAFA] px-3 py-1.5 text-[11px] text-[#8A8A8A] border-b border-[#F0F0F0]">
               输入 @ 后自动列出当前群成员，点选即可 @ 他
             </div>
+            {showAllOption && (
+              <button
+                type="button"
+                onClick={() => chooseMention('所有人')}
+                className="flex w-full items-center gap-2 border-b border-[#F0F0F0] px-3 py-1.5 text-left text-[13px] text-[#07C160] hover:bg-[#F2F7F2]"
+              >
+                <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-[#07C160] text-[11px] text-white">
+                  全
+                </span>
+                <span className="font-medium">艾特所有人</span>
+                <span className="ml-auto text-[11px] text-[#B0B0B0]">全员当场回话</span>
+              </button>
+            )}
             {mentionMatches.map((m) => (
               <button
                 key={m.id}
@@ -295,10 +312,10 @@ export default function ChatView({
               }
             }}
             onKeyDown={(e) => {
-              if (mentionOpen && mentionMatches.length) {
+              if (mentionOpen && (mentionMatches.length || showAllOption)) {
                 if (e.key === 'Enter') {
                   e.preventDefault();
-                  chooseMention(mentionMatches[0].name);
+                  chooseMention(mentionMatches.length ? mentionMatches[0].name : '所有人');
                   return;
                 }
                 if (e.key === 'Escape') {
