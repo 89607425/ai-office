@@ -141,7 +141,13 @@ export function parsePersona(raw: string): Persona {
 }
 
 export function getAgents(): Agent[] {
-  return db().prepare('SELECT * FROM agents ORDER BY created_at').all() as Agent[];
+  const rows = db().prepare('SELECT * FROM agents ORDER BY created_at').all() as (Agent & {
+    persona: string;
+  })[];
+  return rows.map((row) => {
+    const p = parsePersona(row.persona);
+    return { ...row, sassiness: p.sassiness, tone: p.tone, catchphrase: p.catchphrase };
+  });
 }
 
 /** 脱敏后再发给浏览器：key 只留末四位 */
@@ -160,7 +166,12 @@ export function publicAgents(list: Agent[]): AgentPublic[] {
 }
 
 export function getAgent(id: string): Agent | null {
-  return (db().prepare('SELECT * FROM agents WHERE id = ?').get(id) as Agent) || null;
+  const row = db().prepare('SELECT * FROM agents WHERE id = ?').get(id) as
+    | (Agent & { persona: string })
+    | undefined;
+  if (!row) return null;
+  const p = parsePersona(row.persona);
+  return { ...row, sassiness: p.sassiness, tone: p.tone, catchphrase: p.catchphrase };
 }
 
 export function getGroups(): Group[] {
@@ -579,11 +590,26 @@ export function createAgent(input: {
 /** 更新已有员工的模型配置；空 key 表示保留旧 key，避免前端读取或回传密钥。 */
 export function updateAgentConnection(
   id: string,
-  input: { provider?: string; base_url?: string; model?: string; api_key?: string; reasoning_effort?: string; role?: string; system_prompt?: string }
+  input: {
+    name?: string;
+    provider?: string;
+    base_url?: string;
+    model?: string;
+    api_key?: string;
+    reasoning_effort?: string;
+    role?: string;
+    system_prompt?: string;
+    avatar?: string;
+    sassiness?: number;
+    tone?: string;
+    catchphrase?: string;
+    tools_enabled?: number;
+  }
 ): Agent {
   const agent = getAgent(id);
   if (!agent) throw new Error('员工不存在');
 
+  const name = input.name?.trim() || agent.name;
   const provider = (input.provider ?? agent.provider).trim();
   const baseUrl = (input.base_url ?? agent.base_url).trim();
   const model = (input.model ?? agent.model).trim();
@@ -591,9 +617,31 @@ export function updateAgentConnection(
   const reasoningEffort = input.reasoning_effort?.trim() || agent.reasoning_effort;
   const role = input.role?.trim() || agent.role;
   const systemPrompt = input.system_prompt?.trim() || agent.system_prompt;
+  const avatar = input.avatar !== undefined ? (input.avatar ?? '').trim() : agent.avatar;
+  const toolsEnabled = input.tools_enabled !== undefined ? Number(input.tools_enabled) : agent.tools_enabled;
+  const p = parsePersona(agent.persona);
+  const sassiness = input.sassiness !== undefined ? Number(input.sassiness) : p.sassiness;
+  const tone = input.tone !== undefined ? (input.tone ?? '').trim() : p.tone;
+  const catchphrase = input.catchphrase !== undefined ? (input.catchphrase ?? '').trim() : p.catchphrase;
+  const persona = JSON.stringify({ ...p, sassiness, tone, catchphrase });
   db()
-    .prepare('UPDATE agents SET provider = ?, base_url = ?, model = ?, api_key = ?, reasoning_effort = ?, role = ?, system_prompt = ? WHERE id = ?')
-    .run(provider, baseUrl, model, apiKey, reasoningEffort, role, systemPrompt, id);
+    .prepare(
+      'UPDATE agents SET name = ?, provider = ?, base_url = ?, model = ?, api_key = ?, reasoning_effort = ?, role = ?, system_prompt = ?, avatar = ?, tools_enabled = ?, persona = ? WHERE id = ?'
+    )
+    .run(
+      name,
+      provider,
+      baseUrl,
+      model,
+      apiKey,
+      reasoningEffort,
+      role,
+      systemPrompt,
+      avatar,
+      toolsEnabled,
+      persona,
+      id
+    );
   return getAgent(id)!;
 }
 
@@ -629,6 +677,50 @@ export function createGroup(input: {
     kind: 'system',
   });
   return getGroup(id)!;
+}
+
+/** 把已存在的员工加进某个群（幂等：已在群内则忽略） */
+export function addMemberToGroup(groupId: string, agentId: string): void {
+  const g = getGroup(groupId);
+  if (!g) throw new Error('群不存在');
+  const agent = getAgent(agentId);
+  if (!agent) throw new Error('员工不存在');
+  const members = getMembers(groupId).map((m) => m.id);
+  if (members.includes(agentId)) return;
+  db().prepare('INSERT INTO group_members (group_id,agent_id) VALUES (?,?)').run(groupId, agentId);
+  postMessage({
+    group_id: groupId,
+    run_id: null,
+    sender_id: 'system',
+    sender_name: '系统',
+    content: `${agent.name} 加入了群「${g.name}」。`,
+    kind: 'system',
+  });
+}
+
+/** 把某人移出群（组长不能直接移；至少保留 2 人；被移者若是指定反对者会自动重置） */
+export function removeMemberFromGroup(groupId: string, agentId: string): void {
+  const g = getGroup(groupId);
+  if (!g) throw new Error('群不存在');
+  const members = getMembers(groupId);
+  if (members.length <= 2) throw new Error('群至少保留 2 人，无法再移除');
+  const agent = getAgent(agentId);
+  if (!agent) throw new Error('员工不存在');
+  if (g.leader_id === agentId) throw new Error('组长不能直接移除，请先换一个组长');
+  db().prepare('DELETE FROM group_members WHERE group_id = ? AND agent_id = ?').run(groupId, agentId);
+  if (g.critic_id === agentId) {
+    const rest = getMembers(groupId);
+    const next = rest.find((m) => m.id !== g.leader_id)?.id ?? rest[0]?.id ?? '';
+    if (next) db().prepare('UPDATE groups SET critic_id = ? WHERE id = ?').run(next, groupId);
+  }
+  postMessage({
+    group_id: groupId,
+    run_id: null,
+    sender_id: 'system',
+    sender_name: '系统',
+    content: `${agent.name} 已退出群「${g.name}」。`,
+    kind: 'system',
+  });
 }
 
 /* ----------------------------- 删除 ----------------------------- */

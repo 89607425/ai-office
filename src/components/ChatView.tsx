@@ -376,7 +376,7 @@ function Row({ m, members }: { m: Message; members: AgentPublic[] }) {
 
   return (
     <div className={`mb-4 flex gap-3 ${isSelf ? 'flex-row-reverse' : ''}`}>
-      <Avatar id={m.sender_id} text={m.sender_name.slice(0, 1)} size={34} />
+      <Avatar id={m.sender_id} text={agent?.avatar || m.sender_name.slice(0, 1)} size={34} />
       <div className={`max-w-[62%] ${isSelf ? 'items-end text-right' : ''}`}>
         {!isSelf && (
           <div className="mb-1 flex items-center gap-1 text-[11px] text-[#8A8A8A]">

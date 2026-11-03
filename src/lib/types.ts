@@ -20,6 +20,10 @@ export type Agent = {
   reasoning_effort: string;
   persona: string;
   tools_enabled: number;
+  /** 从 persona JSON 中解析出的性格字段，getAgent 会回填到顶层方便前端使用 */
+  sassiness: number;
+  tone: string;
+  catchphrase: string;
   created_at: number;
 };
 

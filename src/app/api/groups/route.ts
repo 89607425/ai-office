@@ -1,5 +1,13 @@
 import { NextResponse } from 'next/server';
-import { createGroup, deleteGroup, getGroups, getMembers, publicAgents } from '@/lib/kernel';
+import {
+  addMemberToGroup,
+  createGroup,
+  deleteGroup,
+  getGroups,
+  getMembers,
+  publicAgents,
+  removeMemberFromGroup,
+} from '@/lib/kernel';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -46,6 +54,27 @@ export async function POST(req: Request) {
       memberIds,
     });
     return NextResponse.json({ ok: true, group });
+  } catch (e) {
+    return NextResponse.json({ error: String(e) }, { status: 400 });
+  }
+}
+
+/** 运行中增删群成员：addMember / removeMember */
+export async function PATCH(req: Request) {
+  const body = (await req.json().catch(() => ({}))) as {
+    action?: 'addMember' | 'removeMember';
+    groupId?: string;
+    agentId?: string;
+  };
+  const { action, groupId, agentId } = body;
+  if (!action || !groupId || !agentId) {
+    return NextResponse.json({ error: '参数不全（需要 action / groupId / agentId）' }, { status: 400 });
+  }
+  try {
+    if (action === 'addMember') addMemberToGroup(groupId, agentId);
+    else if (action === 'removeMember') removeMemberFromGroup(groupId, agentId);
+    else return NextResponse.json({ error: '未知操作' }, { status: 400 });
+    return NextResponse.json({ ok: true });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 400 });
   }

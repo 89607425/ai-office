@@ -35,7 +35,8 @@
     ".next-live/types/**/*.ts",
     ".next-v2/types/**/*.ts",
     ".next-v3/types/**/*.ts",
-    ".next-v4/types/**/*.ts"
+    ".next-v4/types/**/*.ts",
+    ".next/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",

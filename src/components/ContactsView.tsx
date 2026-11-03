@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import type { AgentPublic, Group } from '@/lib/types';
 import Avatar, { colorOf } from './Avatar';
+import AiIcon, { AI_ICON_META } from './aiIcons';
 
 type GroupFull = Group & { members: AgentPublic[]; messages: { id: string }[] };
 
@@ -39,7 +40,8 @@ export default function ContactsView({
   const [loadingSummary, setLoadingSummary] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmGroup, setConfirmGroup] = useState<GroupFull | null>(null);
-  const [connectionTarget, setConnectionTarget] = useState<AgentPublic | null>(null);
+  const [manageGroupId, setManageGroupId] = useState<string | null>(null);
+  const [editingAgent, setEditingAgent] = useState<AgentPublic | null>(null);
 
   async function openDelete(a: AgentPublic) {
     setPending(a);
@@ -106,16 +108,16 @@ export default function ContactsView({
       <div className="min-h-0 flex-1 overflow-y-auto bg-[#F5F5F5] px-6 py-4">
         <div className="mx-auto max-w-[760px] space-y-5">
           <TaskPresetCard />
-          {panel === 'agent' && <NewAgentForm onDone={() => { setPanel('none'); onReload(); }} />}
+          {panel === 'agent' && <AgentForm onDone={() => { setPanel('none'); onReload(); }} onCancel={() => setPanel('none')} />}
           {panel === 'group' && (
             <NewGroupForm agents={agents} onDone={() => { setPanel('none'); onReload(); }} />
           )}
-          {connectionTarget && (
-            <ConnectionForm
-              key={connectionTarget.id}
-              agent={connectionTarget}
+          {editingAgent && (
+            <AgentForm
+              key={editingAgent.id}
+              initial={editingAgent}
               onSaved={onReload}
-              onCancel={() => setConnectionTarget(null)}
+              onCancel={() => setEditingAgent(null)}
             />
           )}
 
@@ -148,10 +150,10 @@ export default function ContactsView({
                   </div>
                   <div className="flex shrink-0 flex-col gap-1">
                     <button
-                      onClick={() => setConnectionTarget(a)}
+                      onClick={() => setEditingAgent(a)}
                       className="rounded border border-[#D9D9D9] px-2 py-1 text-[11px] text-[#6B6B6B] hover:border-[#07C160] hover:text-[#07C160]"
                     >
-                      配置连接
+                      编辑
                     </button>
                     <button
                       onClick={() => onOpenDm(a.id)}
@@ -178,12 +180,8 @@ export default function ContactsView({
                 <div key={g.id} className="flex items-center gap-3 rounded-lg bg-white p-3">
                   <div className="grid h-[40px] w-[40px] grid-cols-2 grid-rows-2 overflow-hidden rounded-md bg-[#C8C8C8]">
                     {g.members.slice(0, 4).map((m) => (
-                      <div
-                        key={m.id}
-                        className="flex items-center justify-center text-[10px] text-white"
-                        style={{ background: colorOf(m.id) }}
-                      >
-                        {m.avatar}
+                      <div key={m.id} className="flex items-center justify-center overflow-hidden">
+                        <Avatar id={m.id} text={m.avatar} size={20} />
                       </div>
                     ))}
                   </div>
@@ -194,6 +192,12 @@ export default function ContactsView({
                       {g.members.find((m) => m.id === g.critic_id)?.name ?? '—'} · {g.members.length} 人
                     </div>
                   </div>
+                  <button
+                    onClick={() => setManageGroupId(g.id)}
+                    className="shrink-0 rounded border border-[#D9D9D9] px-2 py-1 text-[11px] text-[#6B6B6B] hover:border-[#07C160] hover:text-[#07A853]"
+                  >
+                    管理成员
+                  </button>
                   <button
                     onClick={() => setConfirmGroup(g)}
                     className="shrink-0 rounded border border-[#D9D9D9] px-2 py-1 text-[11px] text-[#8A8A8A] hover:border-[#FA5151] hover:text-[#FA5151]"
@@ -280,70 +284,118 @@ export default function ContactsView({
           </div>
         </div>
       )}
+
+      {manageGroupId &&
+        (() => {
+          const g = groups.find((x) => x.id === manageGroupId);
+          return g ? (
+            <ManageMembersModal
+              group={g}
+              agents={agents}
+              onClose={() => setManageGroupId(null)}
+              onChanged={onReload}
+            />
+          ) : null;
+        })()}
     </>
   );
 }
 
-function ConnectionForm({
-  agent,
+function AgentForm({
+  initial,
+  onDone,
   onSaved,
   onCancel,
 }: {
-  agent: AgentPublic;
-  onSaved: () => void;
+  initial?: AgentPublic | null;
+  onDone?: () => void;
+  onSaved?: () => void;
   onCancel: () => void;
 }) {
+  const editing = !!initial;
   const [f, setF] = useState({
-    provider: agent.provider || 'deepseek',
-    base_url: agent.base_url || '',
-    model: agent.model || '',
+    name: initial?.name || '',
+    role: initial?.role || '',
+    system_prompt: initial?.system_prompt || '',
+    provider: initial?.provider || 'deepseek',
+    base_url: initial?.base_url || '',
     api_key: '',
-    reasoning_effort: agent.reasoning_effort || '',
-    role: agent.role || '',
-    system_prompt: agent.system_prompt || '',
+    model: initial?.model || '',
+    reasoning_effort: initial?.reasoning_effort || '',
+    sassiness: initial?.sassiness ?? 0.3,
+    tone: initial?.tone || '',
+    catchphrase: initial?.catchphrase || '',
+    tools_enabled: initial?.tools_enabled || 0,
+    avatar: initial?.avatar || '',
   });
+  const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
-  const [error, setError] = useState('');
-  const set = (k: keyof typeof f, v: string) => setF((prev) => ({ ...prev, [k]: v }));
+  const set = (k: string, v: unknown) => setF((s) => ({ ...s, [k]: v }));
 
-  async function save() {
+  async function submit() {
     setBusy(true);
-    setError('');
+    setErr('');
     setNotice('');
+    const payload: Record<string, unknown> = {
+      name: f.name,
+      role: f.role,
+      system_prompt: f.system_prompt,
+      provider: f.provider,
+      base_url: f.base_url,
+      model: f.model,
+      sassiness: f.sassiness,
+      tone: f.tone,
+      catchphrase: f.catchphrase,
+      tools_enabled: f.tools_enabled,
+      avatar: f.avatar,
+    };
+    if (f.api_key) payload.api_key = f.api_key;
     try {
-      const res = await fetch('/api/agents', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: agent.id, action: 'update_connection', ...f }),
-      });
-      const data = (await res.json()) as { error?: string };
-      if (!res.ok) throw new Error(data.error || '保存失败');
-      setNotice('已保存。建议立即点击“检测连接”。');
-      onSaved();
+      if (editing && initial) {
+        const res = await fetch('/api/agents', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: initial.id, action: 'update_connection', ...payload }),
+        });
+        const data = (await res.json()) as { error?: string };
+        if (!res.ok) throw new Error(data.error || '保存失败');
+        setNotice('已保存。建议立即点击“检测连接”。');
+        onSaved?.();
+      } else {
+        const res = await fetch('/api/agents', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const json = (await res.json()) as { ok?: boolean; error?: string };
+        if (!res.ok) throw new Error(json.error || '创建失败');
+        onDone?.();
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : '保存失败');
+      setErr(e instanceof Error ? e.message : '操作失败');
     } finally {
       setBusy(false);
     }
   }
 
   async function test() {
+    if (!editing || !initial) return;
     setBusy(true);
-    setError('');
+    setErr('');
     setNotice('正在检测…');
     try {
       const res = await fetch('/api/agents', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: agent.id, action: 'test_connection' }),
+        body: JSON.stringify({ id: initial.id, action: 'test_connection' }),
       });
       const data = (await res.json()) as { ok?: boolean; message?: string; error?: string };
       const message = data.message || data.error || '检测失败';
       if (!res.ok || !data.ok) throw new Error(message);
       setNotice(message);
     } catch (e) {
-      setError(e instanceof Error ? e.message : '检测失败');
+      setErr(e instanceof Error ? e.message : '检测失败');
       setNotice('');
     } finally {
       setBusy(false);
@@ -352,93 +404,10 @@ function ConnectionForm({
 
   return (
     <div className="rounded-lg border border-[#07C160] bg-white p-4">
-      <div className="mb-1 text-[13.5px] font-medium text-[#191919]">配置 {agent.name} 的模型连接</div>
-      <div className="mb-3 text-[11px] text-[#8A8A8A]">现有密钥不会展示；留空即保留原密钥。检测不会发送聊天内容。</div>
-      <div className="grid grid-cols-4 gap-3">
-        <Field label="厂商">
-          <select value={f.provider} onChange={(e) => set('provider', e.target.value)} className={inputCls}>
-            {PROVIDERS.filter((p) => p.id).map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
-          </select>
-        </Field>
-        <Field label="模型">
-          <input value={f.model} onChange={(e) => set('model', e.target.value)} placeholder={DEFAULT_MODELS[f.provider] ?? ''} className={inputCls} />
-        </Field>
-        <Field label="新的 API Key">
-          <input type="password" value={f.api_key} onChange={(e) => set('api_key', e.target.value)} placeholder={agent.key_set ? `当前 ${agent.key_hint}` : 'sk-...'} className={inputCls} />
-        </Field>
-        <Field label="推理档位（Kimi）">
-          <select value={f.reasoning_effort} onChange={(e) => set('reasoning_effort', e.target.value)} className={inputCls}>
-            <option value="">厂商默认</option>
-            <option value="low">低（推荐）</option>
-            <option value="high">高</option>
-            <option value="max">最高</option>
-          </select>
-        </Field>
+      <div className="mb-3 text-[13.5px] font-medium text-[#191919]">
+        {editing ? `编辑 ${initial?.name ?? '员工'}` : '新建员工'}
       </div>
-      <div className="mt-3">
-        <Field label="接口地址（自定义厂商时必填）">
-          <input value={f.base_url} onChange={(e) => set('base_url', e.target.value)} placeholder="留空使用官方默认地址" className={inputCls} />
-        </Field>
-      </div>
-      <div className="mt-3">
-        <Field label="岗位 / 角色（换角色用）">
-          <input value={f.role} onChange={(e) => set('role', e.target.value)} placeholder="比如 后端开发" className={inputCls} />
-        </Field>
-      </div>
-      <div className="mt-3">
-        <Field label="人设（换角色用，决定它怎么说话和思考）">
-          <textarea value={f.system_prompt} onChange={(e) => set('system_prompt', e.target.value)} rows={3} placeholder="你是什么性格、遇到需求怎么反应" className={`${inputCls} resize-none`} />
-        </Field>
-      </div>
-      {notice && <div className="mt-2 text-[12px] text-[#07A853]">{notice}</div>}
-      {error && <div className="mt-2 text-[12px] text-[#FA5151]">{error}</div>}
-      <div className="mt-3 flex gap-2">
-        <button onClick={() => void save()} disabled={busy} className="rounded bg-[#07C160] px-4 py-1.5 text-[12.5px] text-white disabled:opacity-40">保存</button>
-        <button onClick={() => void test()} disabled={busy} className="rounded border border-[#07C160] px-3 py-1.5 text-[12.5px] text-[#07A853] disabled:opacity-40">检测连接</button>
-        <button onClick={onCancel} disabled={busy} className="rounded border border-[#D9D9D9] px-3 py-1.5 text-[12.5px] text-[#8A8A8A]">取消</button>
-      </div>
-    </div>
-  );
-}
 
-function NewAgentForm({ onDone }: { onDone: () => void }) {
-  const [f, setF] = useState({
-    name: '',
-    role: '',
-    system_prompt: '',
-    provider: 'deepseek',
-    base_url: '',
-    api_key: '',
-    model: '',
-    sassiness: 0.3,
-    tone: '',
-    catchphrase: '',
-    tools_enabled: 0,
-  });
-  const [err, setErr] = useState('');
-  const [busy, setBusy] = useState(false);
-  const set = (k: string, v: unknown) => setF((s) => ({ ...s, [k]: v }));
-
-  async function submit() {
-    setBusy(true);
-    setErr('');
-    const res = await fetch('/api/agents', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(f),
-    });
-    const json = (await res.json()) as { ok?: boolean; error?: string };
-    setBusy(false);
-    if (!res.ok) {
-      setErr(json.error || '创建失败');
-      return;
-    }
-    onDone();
-  }
-
-  return (
-    <div className="rounded-lg border border-[#07C160] bg-white p-4">
-      <div className="mb-3 text-[13.5px] font-medium text-[#191919]">新建员工</div>
       <div className="grid grid-cols-2 gap-3">
         <Field label="名字">
           <input value={f.name} onChange={(e) => set('name', e.target.value)} placeholder="比如 小周" className={inputCls} />
@@ -446,6 +415,31 @@ function NewAgentForm({ onDone }: { onDone: () => void }) {
         <Field label="岗位">
           <input value={f.role} onChange={(e) => set('role', e.target.value)} placeholder="比如 数据分析" className={inputCls} />
         </Field>
+      </div>
+
+      <div className="mt-3">
+        <div className="mb-1 text-[11px] text-[#8A8A8A]">头像（选一个 AI 图标，或填文字做首字）</div>
+        <div className="flex flex-wrap items-center gap-2">
+          {AI_ICON_META.map((m) => (
+            <button
+              type="button"
+              key={m.key}
+              title={m.name}
+              onClick={() => set('avatar', `ai:${m.key}`)}
+              className={`rounded p-[2px] ${f.avatar === `ai:${m.key}` ? 'ring-2 ring-[#07C160]' : 'opacity-80 hover:opacity-100'}`}
+            >
+              <AiIcon kind={m.key} size={30} />
+            </button>
+          ))}
+          <div className="flex items-center gap-1 border-l border-[#E5E5E5] pl-2">
+            <input
+              value={f.avatar.startsWith('ai:') ? '' : f.avatar}
+              onChange={(e) => set('avatar', e.target.value.slice(0, 2))}
+              placeholder="文字"
+              className={`${inputCls} w-[72px]`}
+            />
+          </div>
+        </div>
       </div>
 
       <div className="mt-3">
@@ -496,19 +490,27 @@ function NewAgentForm({ onDone }: { onDone: () => void }) {
             ))}
           </select>
         </Field>
-        <Field label="API Key（可留空）">
+        <Field label="API Key（编辑时留空保留原密钥）">
           <input
             type="password"
             value={f.api_key}
             onChange={(e) => set('api_key', e.target.value)}
-            placeholder="sk-..."
+            placeholder={editing && initial?.key_set ? '当前已配置' : 'sk-...'}
             className={inputCls}
           />
+        </Field>
+        <Field label="推理档位（Kimi）">
+          <select value={f.reasoning_effort} onChange={(e) => set('reasoning_effort', e.target.value)} className={inputCls}>
+            <option value="">厂商默认</option>
+            <option value="low">低（推荐）</option>
+            <option value="high">高</option>
+            <option value="max">最高</option>
+          </select>
         </Field>
       </div>
 
       <div className="mt-3 grid grid-cols-3 gap-3">
-        <Field label={`怨气值 ${f.sassiness.toFixed(2)}（越高越容易忍不了）`}>
+        <Field label={`怨气值 ${Number(f.sassiness).toFixed(2)}（越高越容易忍不了）`}>
           <input
             type="range"
             min={0}
@@ -534,13 +536,17 @@ function NewAgentForm({ onDone }: { onDone: () => void }) {
         </Field>
       </div>
 
+      {notice && <div className="mt-2 text-[12px] text-[#07A853]">{notice}</div>}
       {err && <div className="mt-2 text-[12px] text-[#FA5151]">{err}</div>}
 
       <div className="mt-3 flex items-center gap-2">
         <button onClick={() => void submit()} disabled={busy} className="rounded bg-[#07C160] px-4 py-1.5 text-[12.5px] text-white hover:bg-[#06AD56] disabled:opacity-40">
-          {busy ? '创建中' : '创建'}
+          {busy ? (editing ? '保存中' : '创建中') : editing ? '保存' : '创建'}
         </button>
-        <button onClick={onDone} className="rounded border border-[#D9D9D9] px-3 py-1.5 text-[12.5px] text-[#8A8A8A]">
+        {editing && (
+          <button onClick={() => void test()} disabled={busy} className="rounded border border-[#07C160] px-3 py-1.5 text-[12.5px] text-[#07A853] disabled:opacity-40">检测连接</button>
+        )}
+        <button onClick={onCancel} disabled={busy} className="rounded border border-[#D9D9D9] px-3 py-1.5 text-[12.5px] text-[#8A8A8A]">
           取消
         </button>
         <span className="ml-auto text-[11px] text-[#9A9A9A]">不填 key 就走全局配置或演示模式</span>
@@ -548,6 +554,7 @@ function NewAgentForm({ onDone }: { onDone: () => void }) {
     </div>
   );
 }
+
 
 function NewGroupForm({ agents, onDone }: { agents: AgentPublic[]; onDone: () => void }) {
   const [name, setName] = useState('');
@@ -654,6 +661,103 @@ function NewGroupForm({ agents, onDone }: { agents: AgentPublic[]; onDone: () =>
           取消
         </button>
         <span className="ml-auto text-[11px] text-[#9A9A8A]">至少选 2 个人</span>
+      </div>
+    </div>
+  );
+}
+
+function ManageMembersModal({
+  group,
+  agents,
+  onClose,
+  onChanged,
+}: {
+  group: GroupFull;
+  agents: AgentPublic[];
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const memberIds = new Set(group.members.map((m) => m.id));
+  const candidates = agents.filter((a) => !memberIds.has(a.id));
+
+  async function patch(action: 'addMember' | 'removeMember', agentId: string) {
+    setBusy(true);
+    setErr('');
+    try {
+      const res = await fetch('/api/groups', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, groupId: group.id, agentId }),
+      });
+      const j = (await res.json()) as { ok?: boolean; error?: string };
+      if (!res.ok || !j.ok) throw new Error(j.error || '操作失败');
+      setBusy(false);
+      onChanged();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : '操作失败');
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/30">
+      <div className="w-[440px] rounded-lg bg-white p-5 shadow-xl">
+        <div className="mb-1 text-[14px] font-medium text-[#191919]">管理「{group.name}」的成员</div>
+        <div className="mb-3 text-[11px] text-[#8A8A8A]">组长不能直接移除；群至少保留 2 人。</div>
+
+        <div className="mb-3">
+          <div className="mb-1 text-[12px] text-[#8A8A8A]">当前成员（{group.members.length}）</div>
+          <div className="space-y-1.5">
+            {group.members.map((m) => {
+              const canRemove = m.id !== group.leader_id && group.members.length > 2;
+              return (
+                <div key={m.id} className="flex items-center gap-2 rounded bg-[#F7F7F7] px-2 py-1.5">
+                  <Avatar id={m.id} text={m.avatar} size={28} />
+                  <span className="text-[13px] text-[#191919]">{m.name}</span>
+                  <span className="text-[11px] text-[#9A9A9A]">{m.role}</span>
+                  {m.id === group.leader_id && (
+                    <span className="rounded bg-[#E7F6EC] px-1 text-[10px] text-[#07C160]">组长</span>
+                  )}
+                  <button
+                    disabled={!canRemove || busy}
+                    onClick={() => void patch('removeMember', m.id)}
+                    className="ml-auto rounded border border-[#D9D9D9] px-2 py-0.5 text-[11px] text-[#8A8A8A] hover:border-[#FA5151] hover:text-[#FA5151] disabled:opacity-30"
+                  >
+                    移除
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {candidates.length > 0 && (
+          <div>
+            <div className="mb-1 text-[12px] text-[#8A8A8A]">添加成员</div>
+            <div className="flex flex-wrap gap-2">
+              {candidates.map((a) => (
+                <button
+                  key={a.id}
+                  disabled={busy}
+                  onClick={() => void patch('addMember', a.id)}
+                  className="flex items-center gap-1 rounded border border-[#D9D9D9] bg-white px-2 py-1 text-[12px] text-[#6B6B6B] hover:border-[#07C160] hover:text-[#07C160] disabled:opacity-40"
+                >
+                  <Avatar id={a.id} text={a.avatar} size={22} />
+                  {a.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {err && <div className="mt-2 text-[12px] text-[#FA5151]">{err}</div>}
+        <div className="mt-4 flex justify-end">
+          <button onClick={onClose} className="rounded border border-[#D9D9D9] px-3 py-1.5 text-[12.5px] text-[#8A8A8A]">
+            关闭
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -1,3 +1,5 @@
+import AiIcon from './aiIcons';
+
 const PALETTE = ['#5B8FF9', '#61DDAA', '#F6BD16', '#F6903D', '#7262FD', '#78D3F8', '#9661BC', '#008685'];
 
 export function colorOf(id: string): string {
@@ -17,6 +19,11 @@ export default function Avatar({
   size?: number;
   radius?: number;
 }) {
+  // avatar 以 "ai:" 开头时，渲染对应的主流 AI 图标；否则按文字头像处理
+  if (text && text.startsWith('ai:')) {
+    return <AiIcon kind={text.slice(3)} size={size} radius={radius} />;
+  }
+
   return (
     <div
       className="flex shrink-0 items-center justify-center font-medium text-white select-none"

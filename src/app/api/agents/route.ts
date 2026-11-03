@@ -45,6 +45,7 @@ export async function POST(req: Request) {
     tone?: string;
     catchphrase?: string;
     tools_enabled?: number;
+    avatar?: string;
   };
 
   const name = (body.name || '').trim();
@@ -67,6 +68,7 @@ export async function POST(req: Request) {
       tone: body.tone,
       catchphrase: body.catchphrase,
       tools_enabled: body.tools_enabled,
+      avatar: (body.avatar || '').trim(),
     });
     return NextResponse.json({ ok: true, agent: publicAgent(agent) });
   } catch (e) {
@@ -78,6 +80,7 @@ export async function PATCH(req: Request) {
   const body = (await req.json().catch(() => ({}))) as {
     id?: string;
     action?: 'update_connection' | 'test_connection';
+    name?: string;
     provider?: string;
     base_url?: string;
     model?: string;
@@ -85,6 +88,11 @@ export async function PATCH(req: Request) {
     reasoning_effort?: string;
     role?: string;
     system_prompt?: string;
+    avatar?: string;
+    sassiness?: number;
+    tone?: string;
+    catchphrase?: string;
+    tools_enabled?: number;
   };
   const id = (body.id || '').trim();
   if (!id) return NextResponse.json({ error: '缺少员工' }, { status: 400 });
